@@ -15,6 +15,7 @@ Used by:
   when the Rust pipeline decision (_use_rust) is True.
 """
 
+import asyncio
 import os
 import time
 from dataclasses import dataclass
@@ -27,6 +28,39 @@ from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 from chunkhound.pipeline_bridge import run_rust_pipeline
 from chunkhound.services.progress_utils import _update_speed_field, format_bytes
+
+
+# Windows only: after run_rust_pipeline() returns, the Rust side's DuckDB can keep its handle on
+# the database file for up to ~1 s (measured: 3 of 8 lone MCP starts, released 0.0-0.96 s later),
+# and Windows refuses the Python reconnect with a sharing violation in that window. The failed
+# reconnect used to abort the whole directory scan (and with it `chunkhound mcp`'s startup).
+_RECONNECT_SHARING_VIOLATION = "being used by another process"
+_RECONNECT_TIMEOUT_S = 10.0
+_RECONNECT_POLL_S = 0.1
+
+
+async def _reconnect_after_rust(
+    db: DatabaseProvider,
+    *,
+    sleep: Any = asyncio.sleep,
+    clock: Any = time.monotonic,
+    timeout_s: float = _RECONNECT_TIMEOUT_S,
+) -> None:
+    """db.connect(), retried while the file is still held by the Rust side's closing DuckDB.
+
+    Only the sharing-violation error is retried, for at most `timeout_s`; any other error, or the
+    same error after the deadline, is raised unchanged. Waits with an awaitable sleep: this runs on
+    the event loop (inside the MCP server), which a blocking sleep would stall.
+    """
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            db.connect()
+            return
+        except Exception as e:
+            if _RECONNECT_SHARING_VIOLATION not in str(e) or clock() >= deadline:
+                raise
+            await sleep(_RECONNECT_POLL_S)
 
 
 class RustProgressBridge:
@@ -475,7 +509,7 @@ async def run_rust_indexing_phase(
             # Clear before connect(): connect()'s own defense-in-depth
             # check would otherwise reject this trusted reconnect.
             db.set_rust_pipeline_in_progress(False)
-            db.connect()
+            await _reconnect_after_rust(db)
 
     diff_elapsed = 0.0
     compact_ran = False
