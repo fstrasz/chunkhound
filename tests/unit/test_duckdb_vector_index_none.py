@@ -13,9 +13,7 @@ _VECTORS = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
 
 
 def _hnsw_index_names(provider: DuckDBProvider) -> list[str]:
-    return [
-        str(row["index_name"]) for row in provider.get_existing_vector_indexes()
-    ]
+    return [str(row["index_name"]) for row in provider.get_existing_vector_indexes()]
 
 
 def _embed(provider: DuckDBProvider, chunk_ids: list[int]) -> None:
