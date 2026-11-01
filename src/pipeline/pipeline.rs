@@ -234,6 +234,7 @@ impl IndexingPipeline {
             compaction_threshold: self.config.compaction_threshold,
             compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
             insert_batch_size: self.config.db_batch_size.max(1),
+            hnsw_enabled: self.config.hnsw_enabled,
         };
 
         // Ensure parent directory exists (DuckDB doesn't auto-create it).
@@ -387,6 +388,7 @@ impl IndexingPipeline {
         let compaction_threshold = self.config.compaction_threshold;
         let compaction_min_size_bytes = self.config.compaction_min_size_mb * 1024 * 1024;
         let insert_batch_size = self.config.db_batch_size.max(1);
+        let hnsw_enabled = self.config.hnsw_enabled;
         let mtime_epsilon = self.config.mtime_epsilon_seconds;
 
         let result = py.allow_threads(|| -> Result<DiffResult, DbError> {
@@ -395,6 +397,7 @@ impl IndexingPipeline {
                 compaction_threshold,
                 compaction_min_size_bytes,
                 insert_batch_size,
+                hnsw_enabled,
             };
             let backend: Box<dyn DbBackend> = create_backend(db_config);
             let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;

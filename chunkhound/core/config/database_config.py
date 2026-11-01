@@ -38,6 +38,19 @@ class DatabaseConfig(BaseModel):
         description="LanceDB vector index type: auto (default), ivf_hnsw_sq, or ivf_rq (requires 0.25.3+)",
     )
 
+    # DuckDB-specific settings
+    duckdb_vector_index: Literal["hnsw", "none"] = Field(
+        default="hnsw",
+        description=(
+            "DuckDB vector index: hnsw (default) builds a VSS HNSW index per "
+            "embedding table; none builds no vector index and drops any "
+            "existing one at connect, so semantic search is an exact scan. "
+            "DuckDB documents HNSW persistence as experimental (no WAL "
+            "recovery for the index: a crash can corrupt it). An exact scan "
+            "measured ~70 ms at 16k x 1024-dim vectors and ~360 ms at 100k."
+        ),
+    )
+
     lancedb_optimize_fragment_threshold: int = Field(
         default=100,
         ge=0,
@@ -218,6 +231,8 @@ class DatabaseConfig(BaseModel):
             config["provider"] = provider
         if index_type := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE"):
             config["lancedb_index_type"] = index_type
+        if vector_index := os.getenv("CHUNKHOUND_DATABASE__DUCKDB_VECTOR_INDEX"):
+            config["duckdb_vector_index"] = vector_index
         if threshold := os.getenv(
             "CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"
         ):

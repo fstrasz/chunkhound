@@ -76,6 +76,9 @@ pub struct DbConfig {
     /// `indexing.db_batch_size`). Must be >= 1 — callers should clamp before
     /// constructing this struct, since `slice::chunks(0)` panics.
     pub insert_batch_size: usize,
+    /// `false` (Python `database.duckdb_vector_index = "none"`) makes
+    /// `ensure_all_hnsw_indexes` build nothing, so no HNSW index is created.
+    pub hnsw_enabled: bool,
 }
 
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {

@@ -250,6 +250,12 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         self.provider_type = "duckdb"  # Identify this as DuckDB provider
 
+        # database.duckdb_vector_index = "none" turns off every HNSW build;
+        # semantic search is then an exact scan (same SQL, no index).
+        self._hnsw_enabled = (
+            getattr(config, "duckdb_vector_index", "hnsw") != "none"
+        )
+
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
@@ -503,6 +509,14 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Migrate legacy embeddings table if needed
             self._executor_migrate_legacy_embeddings_table(conn, state)
+
+            # Vector index switched off: drop any HNSW index an earlier run
+            # built, so no experimental-persistence index stays in the file.
+            if not self._hnsw_enabled and self._executor_get_existing_vector_indexes(
+                conn, state
+            ):
+                self._executor_drop_all_hnsw_indexes(conn, state)
+                conn.execute("CHECKPOINT")
 
             logger.info("Database initialization complete in executor thread")
 
@@ -958,7 +972,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         *, create_hnsw: bool = True,
     ) -> None:
         """Restore the canonical non-table DDL for one embedding table."""
-        if create_hnsw:
+        if create_hnsw and self._hnsw_enabled:
             hnsw_index_name = _embedding_hnsw_index_name(dims)
             try:
                 conn.execute(f"""
@@ -1980,6 +1994,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         metric: str,
     ) -> None:
         """Executor method for create_vector_index - runs in DB thread."""
+        if not self._hnsw_enabled:
+            return
         try:
             # Get the correct table name for the dimensions
             table_name = f"embeddings_{dims}"
@@ -2346,6 +2362,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any]
     ) -> None:
         """Create canonical HNSW indexes on all embedding tables that have data."""
+        if not self._hnsw_enabled:
+            return
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             f"WHERE {_embedding_tables_where_clause()}"
@@ -2377,6 +2395,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
     ) -> None:
         """Recreate one previously discovered HNSW index with its original name."""
+        if not self._hnsw_enabled:
+            return
         table_name = str(index_info["table_name"])
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
@@ -3970,7 +3990,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Lazy HNSW rebuild: crash recovery from a failed/mid-crash indexing run.
             # DuckDB will brute-force scan without an index — correct but slow.
-            if not self._executor_hnsw_index_exists(conn, table_name):
+            if self._hnsw_enabled and not self._executor_hnsw_index_exists(
+                conn, table_name
+            ):
                 hnsw_name = _embedding_hnsw_index_name(query_dims)
                 logger.info(
                     f"No HNSW index on {table_name}, rebuilding (crash recovery)"

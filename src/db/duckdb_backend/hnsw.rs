@@ -108,7 +108,7 @@ pub(super) fn ensure_all_hnsw_indexes(backend: &mut DuckDbHnswBackend) -> Result
     // Reset first so that any error path (including early returns) leaves bulk
     // mode off — otherwise close() would retry in a partially-indexed state.
     backend.hnsw_bulk_mode = false;
-    if !backend.has_vss {
+    if !backend.has_vss || !backend.config.hnsw_enabled {
         return Ok(());
     }
     // Query the DB directly for embedding tables — mirrors Python's
@@ -184,6 +184,7 @@ mod hnsw_tests {
             compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
@@ -222,6 +223,35 @@ mod hnsw_tests {
             after[0].metric, "l2sq",
             "ensure_all_hnsw_indexes must preserve the original non-cosine metric"
         );
+    }
+
+    #[test]
+    fn hnsw_disabled_builds_no_index_through_write_and_reopen() {
+        // database.duckdb_vector_index = "none": a full write -> close -> open
+        // cycle (both ensure_all_hnsw_indexes call sites) must leave no HNSW index.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let config = crate::db::DbConfig {
+            hnsw_enabled: false,
+            ..super::super::test_support::config(db_path)
+        };
+        let mut backend = DuckDbHnswBackend::new(config.clone());
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend.drop_all_hnsw_indexes().expect("drop");
+        backend
+            .write_batch(&super::super::test_support::embedding_batch("a", 128, 50))
+            .expect("write");
+        backend.close().expect("close");
+
+        let mut reopened = DuckDbHnswBackend::new(config);
+        reopened.open().expect("reopen");
+        let conn = reopened.conn_or_err().expect("conn");
+        let indexes = DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover");
+        assert!(indexes.is_empty(), "no HNSW index expected, found {indexes:?}");
     }
 
     #[test]

@@ -178,6 +178,7 @@ mod test_support {
             compaction_threshold: Some(0.30),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
         }
     }
 

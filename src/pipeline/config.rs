@@ -71,6 +71,8 @@ pub(crate) struct PipelineConfig {
     pub compaction_threshold: Option<f64>,
     pub compaction_min_size_mb: u64,
     pub disk_usage_limit_mb: Option<f64>,
+    /// Mirrors Python `database.duckdb_vector_index != "none"`.
+    pub hnsw_enabled: bool,
 
     // Pipeline parallelism
     pub parse_batch_size: usize,
@@ -119,6 +121,7 @@ impl PipelineConfig {
             compaction_threshold: extract_opt_or_default(dict, "compaction_threshold", 0.30)?,
             compaction_min_size_mb: extract_or(dict, "compaction_min_size_mb", 50u64)?,
             disk_usage_limit_mb: extract_opt(dict, "disk_usage_limit_mb")?,
+            hnsw_enabled: extract_or(dict, "hnsw_enabled", true)?,
 
             parse_batch_size: extract_or(dict, "parse_batch_size", 200u64)? as usize,
             parse_thread_pool_size: extract_or(dict, "parse_thread_pool_size", 0u64)? as usize,
