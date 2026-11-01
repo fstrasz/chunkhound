@@ -786,6 +786,8 @@ async def run_rust_pipeline(
         "db_batch_size": db_batch_size,
         "compaction_threshold": compaction_threshold,
         "compaction_min_size_mb": 50,
+        "hnsw_enabled": getattr(database_cfg, "duckdb_vector_index", "hnsw")
+        != "none",
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,
         "embed_thread_pool_size": max_concurrent,
