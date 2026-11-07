@@ -475,6 +475,41 @@ def test_polling_snapshot_skips_files_behind_linked_package(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_polling_snapshot_keeps_directory_reincluded_by_gitignore_whitelist(
+    tmp_path: Path,
+) -> None:
+    """Git's whitelist idiom ("/*" then "!/src/") ignores everything but src/.
+    Pruning the walk by directory must honour the re-include, as git does, or
+    polling would never see a file under src/."""
+    root = tmp_path / "repo"
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (root / "src" / "pkg" / "b.py").write_text("B = 1\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "c.py").write_text("C = 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text("/*\n!/src/\n!.gitignore\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "whitelist.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+    services = create_services(tmp_path / "whitelist.duckdb", config)
+    services.provider.connect()
+    try:
+        service = RealtimeIndexingService(services, config)
+
+        current_files, _files_checked, _truncated = service._polling_snapshot(root)
+
+        assert sorted(current_files) == [
+            root / "src" / "a.py",
+            root / "src" / "pkg" / "b.py",
+        ]
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
     tmp_path: Path,
