@@ -18,10 +18,14 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 # On Linux, inotify reports every open and close (`opened`, `closed`,
 # `closed_no_write`); a start-up scan or a type-check run reads the whole tree,
 # so letting those through filled the queue, overflowed it and forced a full
-# resync (TFS 65770). A write there always also yields `modified` (or
-# `created`/`moved`), so dropping `closed` loses nothing.
-# `attrib` stays: on Windows, watchdog 7 reports an in-place write as `attrib`
-# whenever the change time is ahead of the write time, so it can be a write.
+# resync (TFS 65770). The consumer never acted on `closed`, so dropping it
+# changes nothing indexed (a write also yields `modified`, `created` or
+# `moved`, except an mmap write, which inotify reports only on close).
+# `attrib` is admitted although the consumer does not act on it yet: on
+# Windows, watchdog 7 reports an in-place write as `attrib` whenever the change
+# time is ahead of the write time, so for some writes it is the only signal.
+# It also arrives for every last-access update there, one per file read, so on
+# Windows reads still take queue slots. Both are TFS 65771.
 CONTENT_EVENT_TYPES = frozenset({"created", "modified", "deleted", "moved", "attrib"})
 
 
@@ -45,7 +49,6 @@ def watchdog_event_filter() -> list[type]:
         # Only watchdog 7 has the attrib classes; 6 reports attrib as modified.
         "attrib": ("FileAttribEvent",),
     }
-    assert set(names) == CONTENT_EVENT_TYPES
     return [
         getattr(watchdog_events, name)
         for event_type in sorted(names)
