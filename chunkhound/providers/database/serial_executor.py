@@ -229,11 +229,14 @@ class SerialDatabaseExecutor:
         yet, the idle time counts from the start of the hold and the phase is
         None. None when no Rust run holds the file.
         """
+        # Load before checking the flag: the hold's end clears the flag first,
+        # so a flag still set after these loads means they are this hold's
+        # (TFS 65797 review).
         started_at = self._rust_hold_started_at
-        if started_at is None or not self.is_rust_pipeline_in_progress():
-            return None
         main = self._rust_main_progress
         store = self._rust_store_progress
+        if started_at is None or not self.is_rust_pipeline_in_progress():
+            return None
         reports = [report for report in (main, store) if report is not None]
         if not reports:
             return time.monotonic() - started_at, None
