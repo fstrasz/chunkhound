@@ -488,7 +488,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 },
             },
             # Kernel inotify queue overflows (TFS 65772). detection: "active",
-            # "unavailable" (Linux, watchdog < 7.1: not detected),
+            # "unavailable" (Linux, but no hook: not detected),
             # "not_applicable", or None before a watchdog observer is adopted.
             "inotify_overflow": {
                 "detection": None,
@@ -645,8 +645,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "count": self._inotify_overflow_count,
                 "last_at": self._inotify_overflow_last_at,
                 "hint": (
-                    "watchdog < 7.1 on Linux: kernel inotify queue overflows "
-                    "are not detected, so events they drop are not resynced."
+                    "Kernel inotify queue overflows are not detected here "
+                    "(this needs watchdog 7.1's inotify observer; older "
+                    "versions, untested newer internals, or an unusable "
+                    "inotify all report unavailable), so events an overflow "
+                    "drops are not resynced."
                     if self._inotify_overflow_detection == "unavailable"
                     else None
                 ),

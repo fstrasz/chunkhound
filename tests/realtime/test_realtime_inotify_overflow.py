@@ -155,3 +155,36 @@ async def test_overflow_requests_a_loss_of_sync_resync(
         assert overflow["last_at"] is not None
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_overflow_resync_request_degrades_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resync request that raises after an overflow is reported, not lost."""
+    config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})
+    service = RealtimeIndexingService(SimpleNamespace(provider=None), config)
+    attempted = asyncio.Event()
+
+    async def failing_request_resync(
+        reason: str, details: dict[str, Any] | None = None
+    ) -> bool:
+        attempted.set()
+        raise RuntimeError("resync queue unavailable")
+
+    monkeypatch.setattr(service, "request_resync", failing_request_resync)
+    try:
+        service._record_inotify_overflow()
+        await asyncio.wait_for(attempted.wait(), timeout=5.0)
+        for _ in range(100):
+            if service._last_error is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        health = await service.get_health()
+        assert health["last_error"] == (
+            "Watchdog resync request failed: resync queue unavailable"
+        )
+        assert health["service_state"] == "degraded"
+    finally:
+        await service.stop()
