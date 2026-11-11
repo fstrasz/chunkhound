@@ -201,8 +201,12 @@ class SerialDatabaseProvider(ABC):
         self._executor.note_rust_pipeline_progress(phase)
 
     def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
-        """Return (seconds since the last progress, its phase) during a Rust hold."""
+        """Return (seconds since any stage's progress, its phase) in a Rust hold."""
         return self._executor.rust_pipeline_progress()
+
+    def rust_pipeline_store_phase(self) -> str | None:
+        """Return the phase the store stage last reported during a Rust hold."""
+        return self._executor.rust_pipeline_store_phase()
 
     def is_compaction_in_progress(self) -> bool:
         """Return True while a compaction holds the database file."""

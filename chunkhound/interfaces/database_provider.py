@@ -98,8 +98,16 @@ class DatabaseProvider(Protocol):
         ...
 
     def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
-        """Return (seconds since the last progress, its phase) during a Rust
-        hold, or None when no Rust run holds the file."""
+        """Return (seconds since the last progress from any stage, its phase)
+        during a Rust hold, or None when no Rust run holds the file."""
+        ...
+
+    def rust_pipeline_store_phase(self) -> str | None:
+        """Return the phase the store stage last reported during a Rust hold.
+
+        None outside a hold or before the store stage's first report
+        (TFS 65797).
+        """
         ...
 
     def is_compaction_in_progress(self) -> bool:

@@ -268,7 +268,7 @@ async def test_rust_run_progress_is_noted_without_progress_display(monkeypatch):
     noted: dict = {}
 
     async def fake_run_rust_pipeline(*args, **kwargs):
-        db.executor._rust_progress_at -= 1000
+        db.executor._rust_hold_started_at -= 1000
         noted["before"] = db.executor.rust_pipeline_progress()
         kwargs["progress_callback"]("write-data", 1, 2, 10)
         noted["after"] = db.executor.rust_pipeline_progress()
