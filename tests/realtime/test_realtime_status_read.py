@@ -1,10 +1,9 @@
 """A status read reports the realtime state as of now (TFS 65773).
 
-daemon_status served the snapshot the realtime service last published, and the
-service publishes only when it records something. Between publishes the event
-queue can drain and time can pass, so the published snapshot went stale: a
-drained queue kept reading `busy` until the next filesystem event, and a stall
-past the threshold could never read `stalled`.
+The realtime service publishes its snapshot only when it records something.
+Between publishes the event queue can drain and time can pass, so a status read
+that served the published snapshot would show a drained queue as `busy` until
+the next filesystem event, and could never show a stall past the threshold.
 """
 
 from __future__ import annotations
@@ -67,11 +66,12 @@ async def server_and_service(
 
 
 def _realtime(server: _Server) -> dict:
-    return server._current_scan_progress()["realtime"]
+    """What the daemon_status tool is given, as both tool dispatchers pass it."""
+    return server._scan_progress_for_tool("daemon_status")["realtime"]
 
 
 @pytest.mark.asyncio
-async def test_status_read_reports_a_stall_with_no_publish_since(
+async def test_status_read_reflects_state_since_the_last_publish(
     server_and_service: tuple[_Server, RealtimeIndexingService, Path],
 ) -> None:
     server, service, root = server_and_service
@@ -86,10 +86,16 @@ async def test_status_read_reports_a_stall_with_no_publish_since(
         seconds=service._STALL_THRESHOLD_SECONDS + 30
     )
     service._last_accepted_event_at = stale.replace(microsecond=0).isoformat()
-
     realtime = _realtime(server)
     assert realtime["live_indexing_state"] == "stalled"
     assert realtime["event_queue"]["size"] == 1
+
+    # The queue drains with no publish.
+    service.event_queue.get_nowait()
+    service.event_queue.task_done()
+    realtime = _realtime(server)
+    assert realtime["live_indexing_state"] == "idle"
+    assert realtime["event_queue"]["size"] == 0
 
 
 @pytest.mark.asyncio

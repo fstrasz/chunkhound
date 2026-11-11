@@ -398,6 +398,8 @@ class MCPServerBase(ABC):
             self._warm_ready_started_monotonic = time.monotonic()
             self._scan_progress["realtime"] = self._default_realtime_scan_status()
             self._realtime_failure_recorded = False
+            # A start task left from an earlier run belongs to a stopped service.
+            self._realtime_start_task = None
             if self._realtime_startup_mode() == "daemon":
                 self._startup_publish_complete.clear()
             else:
@@ -834,13 +836,13 @@ class MCPServerBase(ABC):
         """scan_progress for a status read, with the realtime section built now.
 
         The realtime service publishes its snapshot only when it records
-        something, so the published one goes stale between events: a queue that
-        drained without a publish kept reading `busy`, and a stall past the
-        threshold never read `stalled` (TFS 65773). A status read therefore
-        takes the service's state as of now. It keeps the published section
-        while the service has not started cleanly, or once a realtime failure
-        was recorded, because those records exist only in the published one.
-        Nothing is written back.
+        something, so between publishes the published section can show a
+        drained queue as `busy` and cannot show `stalled` (TFS 65773). A status
+        read therefore takes the service's state as of now. It keeps the
+        published section while the service has not started cleanly, once a
+        realtime failure was recorded (that record exists only in the published
+        section), and if building the snapshot fails: status must never break
+        a status read. Nothing is written back.
         """
         service = self.realtime_indexing
         task = self._realtime_start_task
@@ -853,9 +855,19 @@ class MCPServerBase(ABC):
             or self._realtime_failure_recorded
         ):
             return self._scan_progress
-        realtime = service.health_snapshot()
-        realtime["startup"] = self._startup_tracker.snapshot()
+        try:
+            realtime = service.health_snapshot()
+            realtime["startup"] = self._startup_tracker.snapshot()
+        except Exception as error:
+            self.debug_log(f"Realtime status read used the published one: {error}")
+            return self._scan_progress
         return {**self._scan_progress, "realtime": realtime}
+
+    def _scan_progress_for_tool(self, tool_name: str) -> dict[str, Any]:
+        """The scan_progress a tool call gets; only daemon_status reads it."""
+        if tool_name == "daemon_status":
+            return self._current_scan_progress()
+        return self._scan_progress
 
     def _record_realtime_failure(self, message: str) -> None:
         """Persist a startup failure into the shared realtime status snapshot."""
@@ -1436,11 +1448,7 @@ class MCPServerBase(ABC):
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,
-                scan_progress=(
-                    self._current_scan_progress()
-                    if tool_name == "daemon_status"
-                    else self._scan_progress
-                ),
+                scan_progress=self._scan_progress_for_tool(tool_name),
                 llm_manager=self.llm_manager,
                 config=self.config,
                 ensure_services=self.ensure_tool_services,
