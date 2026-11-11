@@ -34,6 +34,7 @@ def test_kernel_overflow_reaches_the_service() -> None:
     observer, detection = startup_module._create_watchdog_observer(
         lambda: calls.append(None)
     )
+    observer.start()
     try:
         assert detection == "active"
         observer._inotify_fd.handle_event(  # type: ignore[attr-defined]
