@@ -251,7 +251,10 @@ mod hnsw_tests {
         reopened.open().expect("reopen");
         let conn = reopened.conn_or_err().expect("conn");
         let indexes = DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover");
-        assert!(indexes.is_empty(), "no HNSW index expected, found {indexes:?}");
+        assert!(
+            indexes.is_empty(),
+            "no HNSW index expected, found {indexes:?}"
+        );
     }
 
     #[test]
