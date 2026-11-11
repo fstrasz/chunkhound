@@ -41,11 +41,12 @@ WATCHDOG_TO_CONSUMER_EVENT = {
 def ignore_windows_last_access() -> None:
     """Stop watchdog's Windows emitter from reporting last-access changes.
 
-    With last-access updates on (the Windows default for system volumes),
-    every read of a file not read for an hour changes its access time, and
-    watchdog subscribes to that (FILE_NOTIFY_CHANGE_LAST_ACCESS): each read
-    then raised an event (7: `attrib`, 6: `modified`) and took a queue slot,
-    and the start-up scan reads every file. Writes still arrive through
+    When last-access updates are on (`fsutil behavior query
+    disablelastaccess`), every read of a file not read for an hour changes its
+    access time, and watchdog subscribes to that
+    (FILE_NOTIFY_CHANGE_LAST_ACCESS): without this, each read raises an event
+    (7: `attrib`, 6: `modified`) that takes a queue slot, and the start-up scan
+    reads every file. Writes still arrive through
     LAST_WRITE, SIZE and ATTRIBUTES (TFS 65771).
 
     watchdog has no per-watch flag: it reads the module global

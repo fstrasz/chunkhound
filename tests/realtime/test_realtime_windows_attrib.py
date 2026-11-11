@@ -2,11 +2,11 @@
 
 On Windows, watchdog 7 reports a FILE_ACTION_MODIFIED as `attrib` whenever the
 record's change time is ahead of its write time, a race an ordinary append
-usually loses: on NTFS most in-place writes arrive as `attrib` alone. The
-consumer acts only on created/modified/deleted, so those writes were never
-indexed. And because watchdog subscribes to last-access changes, every read
-of a file not read for an hour raised a notification too (7: `attrib`; 6:
-`modified`), each taking an event-queue slot; the start-up scan reads every file.
+usually loses: on NTFS most in-place writes arrive as `attrib` alone, and an
+`attrib` the consumer does not act on is a write that is never indexed. And
+while watchdog subscribes to last-access changes, every read of a file not
+read for an hour raises a notification too (7: `attrib`; 6: `modified`), each
+taking an event-queue slot; the start-up scan reads every file.
 """
 
 from __future__ import annotations
