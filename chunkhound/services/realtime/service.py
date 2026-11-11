@@ -20,6 +20,9 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.providers.database.serial_executor import (
+    _COMPACTION_OPERATION_TIMEOUT_SECONDS,
+)
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
@@ -81,6 +84,14 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     # Backoff before each retry of a resync whose scan raised (TFS 65789).
     _RESYNC_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 15.0, 45.0)
     _STALL_THRESHOLD_SECONDS = 30.0
+    # A Rust run holding the database with no progress callback for this long
+    # reads stalled (TFS 65793). Every phase but the single native steps below
+    # reports per batch.
+    _RUST_HOLD_STALL_SECONDS = 600.0
+    # These steps report nothing until write-done; allow twice what the
+    # executor allows the same work.
+    _RUST_SINGLE_STEP_PHASES = ("write-compact", "write-index")
+    _RUST_SINGLE_STEP_STALL_SECONDS = 2 * _COMPACTION_OPERATION_TIMEOUT_SECONDS
     _EVENT_PRESSURE_WINDOW_SECONDS = 30.0
     _EVENT_PRESSURE_MAX_TRACKED_PATHS = 64
     _EVENT_PRESSURE_ELEVATED_EVENTS = 20
@@ -231,6 +242,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0
         self._processing_error_count = 0
+        # (idle seconds, last phase) of a stalled Rust hold, recorded by the
+        # state derivation for its hint.
+        self._rust_hold_stall: tuple[float, str | None] | None = None
         self._active_processing_count = 0
         self._event_pressure_by_path: dict[str, HotPathPressure] = {}
         self._active_change_generations: dict[str, int | None] = {}
@@ -920,6 +934,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         ):
             return "uninitialized"
 
+        # Ahead of busy and idle: a hung initial scan holds with no backlog.
+        self._rust_hold_stall = self._stalled_rust_hold()
+        if self._rust_hold_stall is not None:
+            return "stalled"
+
         if self._active_processing_count > 0:
             return "busy"
 
@@ -953,6 +972,23 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 return "stalled"
         return "busy"
 
+    def _stalled_rust_hold(self) -> tuple[float, str | None] | None:
+        """Return (idle seconds, last phase) when a Rust hold has stopped progressing.
+
+        A native run cannot be interrupted from Python, so a hung one is
+        reported rather than recovered (TFS 65793).
+        """
+        progress = self.services.provider.rust_pipeline_progress()
+        if progress is None:
+            return None
+        idle_seconds, phase = progress
+        ceiling = (
+            self._RUST_SINGLE_STEP_STALL_SECONDS
+            if phase in self._RUST_SINGLE_STEP_PHASES
+            else self._RUST_HOLD_STALL_SECONDS
+        )
+        return progress if idle_seconds > ceiling else None
+
     def _derive_live_indexing_hint(self, live_indexing_state: str) -> str:
         if live_indexing_state == "degraded":
             if self._event_queue_overflow_state == "reconciling":
@@ -974,6 +1010,13 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "Live indexing is degraded; inspect last_error and resync.last_error."
             )
         if live_indexing_state == "stalled":
+            if self._rust_hold_stall is not None:
+                idle_seconds, phase = self._rust_hold_stall
+                return (
+                    "The Rust indexing run has reported no progress for "
+                    f"{idle_seconds:.0f}s (last phase: {phase}) while holding "
+                    "the database; realtime writes wait for it."
+                )
             return (
                 "Accepted events are queued but processing has not advanced in "
                 "30s; inspect pipeline timestamps and processing_error_count."

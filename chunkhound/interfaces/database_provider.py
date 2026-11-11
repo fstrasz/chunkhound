@@ -89,6 +89,19 @@ class DatabaseProvider(Protocol):
         the database file (see `set_rust_pipeline_in_progress`)."""
         ...
 
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Record that the Rust run holding the file reported progress in phase.
+
+        Must not go through the serial executor's queue, which rejects work
+        while the Rust pipeline owns the file (TFS 65793).
+        """
+        ...
+
+    def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
+        """Return (seconds since the last progress, its phase) during a Rust
+        hold, or None when no Rust run holds the file."""
+        ...
+
     def is_compaction_in_progress(self) -> bool:
         """Return True while a compaction holds the database file."""
         ...

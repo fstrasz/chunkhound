@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import chunkhound.services.rust_pipeline_runner as runner_module
+from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
 from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
 
 
@@ -30,6 +31,7 @@ class FakeDatabaseProvider:
         self.rust_pipeline_active = False
         self.rust_pipeline_active_during_run: bool | None = None
         self.rust_pipeline_active_during_release: bool | None = None
+        self.executor = SerialDatabaseExecutor()
 
     @property
     def is_connected(self) -> bool:
@@ -45,6 +47,11 @@ class FakeDatabaseProvider:
 
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
         self.rust_pipeline_active = active
+        self.executor.set_rust_pipeline_in_progress(active)
+
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Delegate to the real executor, as the serial provider does."""
+        self.executor.note_rust_pipeline_progress(phase)
 
     def connect(self) -> None:
         self.connect_calls += 1
@@ -248,3 +255,30 @@ async def test_rust_pipeline_flag_cleared_even_when_rust_pipeline_raises(monkeyp
         await run_rust_indexing_phase(**_phase_kwargs(db))
 
     assert db.rust_pipeline_active is False
+
+
+@pytest.mark.asyncio
+async def test_rust_run_progress_is_noted_without_progress_display(monkeypatch):
+    """A Rust callback refreshes the hold's heartbeat with no display (TFS 65793).
+
+    Without a progress display no callback was passed, so a run holding the
+    database reported no progress at all.
+    """
+    db = FakeDatabaseProvider(connected=True)
+    noted: dict = {}
+
+    async def fake_run_rust_pipeline(*args, **kwargs):
+        db.executor._rust_progress_at -= 1000
+        noted["before"] = db.executor.rust_pipeline_progress()
+        kwargs["progress_callback"]("write-data", 1, 2, 10)
+        noted["after"] = db.executor.rust_pipeline_progress()
+        return {}
+
+    monkeypatch.setattr(runner_module, "run_rust_pipeline", fake_run_rust_pipeline)
+
+    await run_rust_indexing_phase(**_phase_kwargs(db))
+
+    assert noted["before"][0] > 600
+    idle_seconds, phase = noted["after"]
+    assert idle_seconds < 5
+    assert phase == "write-data"
