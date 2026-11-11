@@ -646,7 +646,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.37.0" },
     { name = "voyageai", specifier = ">=0.2.0" },
     { name = "watchdog", marker = "python_full_version < '3.11'", specifier = ">=4.0.0" },
-    { name = "watchdog", marker = "python_full_version >= '3.11'", specifier = ">=7.1.0" },
+    { name = "watchdog", marker = "python_full_version >= '3.11'", specifier = "==7.1.0" },
     { name = "xxhash", specifier = ">=3.0.0" },
     { name = "zendriver", specifier = "==0.15.3" },
     { name = "zstandard", specifier = ">=0.23.0" },

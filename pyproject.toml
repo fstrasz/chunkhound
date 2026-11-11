@@ -75,7 +75,11 @@ dependencies = [
     "tree-sitter-lua>=0.4.0",
     "tree-sitter-make>=0.1.0",
     # 7.1 reports a kernel inotify queue overflow (TFS 65772); it needs Python 3.11.
-    "watchdog>=7.1.0; python_version >= '3.11'",
+    # Pinned exactly because the overflow hook relies on watchdog's private
+    # inotify internals, which move in patch releases (TFS 65794). Raise the pin
+    # only after test_overflow_record_from_the_reader_reaches_on_overflow passes
+    # on Linux against the candidate release.
+    "watchdog==7.1.0; python_version >= '3.11'",
     "watchdog>=4.0.0; python_version < '3.11'",
     "xxhash>=3.0.0",
     "tree-sitter-bash>=0.25.0",

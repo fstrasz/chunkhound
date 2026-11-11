@@ -8,6 +8,7 @@ without a hook ChunkHound never learns that changes were lost.
 from __future__ import annotations
 
 import asyncio
+import struct
 import sys
 import threading
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.services.realtime.inotify_overflow import create_inotify_observer
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
 
@@ -46,6 +48,53 @@ def test_kernel_overflow_reaches_the_service() -> None:
     finally:
         observer.stop()
         observer.join(timeout=1.0)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="inotify is Linux-only"
+)
+def test_overflow_record_from_the_reader_reaches_on_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive an IN_Q_OVERFLOW record through watchdog's real FD reader.
+
+    The kernel record goes through run -> read_events -> _parse_event_buffer
+    -> handle_event, so this fails if a watchdog release filters the record
+    in read_events or dispatches it without handle_event (TFS 65794).
+    """
+    inotify_c = pytest.importorskip("watchdog.observers.inotify_c")
+    if not hasattr(inotify_c, "InotifyFD"):
+        pytest.skip("watchdog < 7 has no inotify overflow hook")
+
+    calls: list[int] = []
+    observer = create_inotify_observer(lambda: calls.append(1))
+    assert observer is not None
+    try:
+        fd = observer._inotify_fd  # type: ignore[attr-defined]
+        # Retire the reader the observer started, then run it on this thread.
+        fd.stop()
+        fd.join(timeout=5)
+        assert not fd.is_alive()
+        fd._stopped_event.clear()
+
+        reads: list[int] = []
+
+        def fake_read_event_buffer(event_buffer_size: int) -> bytes:
+            reads.append(event_buffer_size)
+            if len(reads) == 1:
+                return struct.pack(
+                    "iIII", -1, inotify_c.InotifyConstants.IN_Q_OVERFLOW, 0, 0
+                )
+            fd._stopped_event.set()
+            return b""
+
+        monkeypatch.setattr(
+            fd, "_read_event_buffer", fake_read_event_buffer, raising=True
+        )
+        fd.run()
+        assert len(calls) == 1
+    finally:
+        observer.stop()
 
 
 @pytest.mark.asyncio
