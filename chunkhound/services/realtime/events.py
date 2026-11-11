@@ -13,20 +13,57 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
-# The only watchdog event types that can mean a file's content changed. Every
-# other type is dropped where it arrives, before it takes an event-queue slot.
+# The watchdog event types that can mean a file's content changed, and the type
+# the consumer sees for each. This map is the only place a watchdog type is
+# admitted; every other type is dropped where it arrives, before it takes an
+# event-queue slot.
 # On Linux, inotify reports every open and close (`opened`, `closed`,
 # `closed_no_write`); a start-up scan or a type-check run reads the whole tree,
 # so letting those through filled the queue, overflowed it and forced a full
 # resync (TFS 65770). The consumer never acted on `closed`, so dropping it
 # changes nothing indexed (a write also yields `modified`, `created` or
 # `moved`, except an mmap write, which inotify reports only on close).
-# `attrib` is admitted although the consumer does not act on it yet: on
-# Windows, watchdog 7 reports an in-place write as `attrib` whenever the change
-# time is ahead of the write time, so for some writes it is the only signal.
-# It also arrives for every last-access update there, one per file read, so on
-# Windows reads still take queue slots. Both are TFS 65771.
-CONTENT_EVENT_TYPES = frozenset({"created", "modified", "deleted", "moved", "attrib"})
+# `attrib` is a change (TFS 65771): on Windows, watchdog 7 reports an in-place
+# write as `attrib` whenever the record's change time is ahead of its write
+# time, which an ordinary append usually is, so for most writes it is the only
+# signal. On Linux it is IN_ATTRIB (chmod, touch), which watchdog 6 already
+# reported as `modified`. Reads raise no `attrib` on Windows because
+# ignore_windows_last_access() unsubscribes from last-access changes.
+WATCHDOG_TO_CONSUMER_EVENT = {
+    "created": "created",
+    "modified": "modified",
+    "attrib": "modified",
+    "deleted": "deleted",
+    "moved": "moved",
+}
+
+
+def ignore_windows_last_access() -> None:
+    """Stop watchdog's Windows emitter from reporting last-access changes.
+
+    With last-access updates on (the Windows default for system volumes),
+    every read of a file not read for an hour changes its access time, and
+    watchdog subscribes to that (FILE_NOTIFY_CHANGE_LAST_ACCESS): each read
+    then raised an event (7: `attrib`, 6: `modified`) and took a queue slot,
+    and the start-up scan reads every file. Writes still arrive through
+    LAST_WRITE, SIZE and ATTRIBUTES (TFS 65771).
+
+    watchdog has no per-watch flag: it reads the module global
+    WATCHDOG_FILE_NOTIFY_FLAGS on every ReadDirectoryChangesW call (6.0 and
+    7.1), so clearing the bit before an observer starts covers every watch.
+    It is process-wide; ChunkHound's watchdog observer is its only user here.
+    """
+    if os.name != "nt":
+        return
+    try:
+        from watchdog.observers import winapi
+    except ImportError:
+        return
+    flags = getattr(winapi, "WATCHDOG_FILE_NOTIFY_FLAGS", None)
+    last_access = getattr(winapi, "FILE_NOTIFY_CHANGE_LAST_ACCESS", None)
+    if flags is None or last_access is None:
+        return
+    winapi.WATCHDOG_FILE_NOTIFY_FLAGS = flags & ~last_access
 
 
 def watchdog_event_filter() -> list[type]:
@@ -202,11 +239,12 @@ class SimpleEventHandler:
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
         # No callbacks for a dropped read: each would cost a cross-thread call.
-        if event.event_type not in CONTENT_EVENT_TYPES:
+        event_type = WATCHDOG_TO_CONSUMER_EVENT.get(event.event_type)
+        if event_type is None:
             return
 
         # Handle directory creation
-        if event.event_type == "created" and event.is_directory:
+        if event_type == "created" and event.is_directory:
             # An excluded directory is never resolved or walked. Judge it where
             # it sits in the tree: resolving first would turn a link under
             # node_modules/ into its target outside the root, which no exclude
@@ -221,7 +259,7 @@ class SimpleEventHandler:
             return
 
         # Handle directory deletion
-        if event.event_type == "deleted" and event.is_directory:
+        if event_type == "deleted" and event.is_directory:
             # Queue directory deletion for cleanup
             file_path = Path(normalize_file_path(event.src_path))
             self._record_source_event("dir_deleted", file_path)
@@ -233,7 +271,7 @@ class SimpleEventHandler:
             return
 
         # Handle move events for atomic writes
-        if event.event_type == "moved" and hasattr(event, "dest_path"):
+        if event_type == "moved" and hasattr(event, "dest_path"):
             self._handle_move_event(event.src_path, event.dest_path)
             return
 
@@ -242,15 +280,15 @@ class SimpleEventHandler:
         # rejected event is never resolved: a burst of excluded events must not
         # pay for path resolution.
         in_tree = _in_tree_path(event.src_path)
-        self._record_source_event(event.event_type, in_tree)
+        self._record_source_event(event_type, in_tree)
 
         # Simple filtering for supported file types, with a shared
         # previously-indexed delete exception for cleanup correctness.
-        if not self._should_admit_event(event.event_type, in_tree):
-            self._record_filtered_event(event.event_type, in_tree)
+        if not self._should_admit_event(event_type, in_tree):
+            self._record_filtered_event(event_type, in_tree)
             return
 
-        self._queue_admitted(event.event_type, in_tree)
+        self._queue_admitted(event_type, in_tree)
 
     def _should_index(self, file_path: Path) -> bool:
         """Check if file should be indexed based on config patterns.
