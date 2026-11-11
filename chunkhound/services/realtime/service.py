@@ -205,6 +205,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._event_queue_overflow_last_cleared_at: str | None = None
         self._event_queue_overflow_sample_event_type: str | None = None
         self._event_queue_overflow_sample_file_path: str | None = None
+        self._inotify_overflow_detection: str | None = None
+        self._inotify_overflow_count = 0
+        self._inotify_overflow_last_at: str | None = None
         self._last_source_event_at: str | None = None
         self._last_source_event_type: str | None = None
         self._last_source_event_path: str | None = None
@@ -237,7 +240,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None] | None
+            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler, str] | None]
+            | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
@@ -462,6 +466,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                     "sample_file_path": None,
                 },
             },
+            # Kernel inotify queue overflows (TFS 65772). detection: "active",
+            # "unavailable" (Linux, watchdog < 7.1: not detected),
+            # "not_applicable", or None before a watchdog observer is adopted.
+            "inotify_overflow": {
+                "detection": None,
+                "count": 0,
+                "last_at": None,
+                "hint": None,
+            },
             "resync": {
                 "needs_resync": False,
                 "in_progress": False,
@@ -601,6 +614,19 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "last_cleared_at": self._event_queue_overflow_last_cleared_at,
                 "sample_event_type": self._event_queue_overflow_sample_event_type,
                 "sample_file_path": self._event_queue_overflow_sample_file_path,
+            }
+        )
+        status["inotify_overflow"].update(
+            {
+                "detection": self._inotify_overflow_detection,
+                "count": self._inotify_overflow_count,
+                "last_at": self._inotify_overflow_last_at,
+                "hint": (
+                    "watchdog < 7.1 on Linux: kernel inotify queue overflows "
+                    "are not detected, so events they drop are not resynced."
+                    if self._inotify_overflow_detection == "unavailable"
+                    else None
+                ),
             }
         )
         status["resync"].update(

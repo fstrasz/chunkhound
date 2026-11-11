@@ -83,12 +83,16 @@ def test_watches_are_scheduled_without_read_only_events(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    monkeypatch.setattr(startup_module, "_create_watchdog_observer", FakeObserver)
+    monkeypatch.setattr(
+        startup_module,
+        "_create_watchdog_observer",
+        lambda on_overflow: (FakeObserver(), "not_applicable"),
+    )
     config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})
     service = RealtimeIndexingService(SimpleNamespace(provider=None), config)
     loop = asyncio.new_event_loop()
     try:
-        observer, handler = service._bootstrap_fs_monitor(
+        observer, handler, _detection = service._bootstrap_fs_monitor(
             tmp_path, loop, threading.Event()
         )
         service.observer = observer
