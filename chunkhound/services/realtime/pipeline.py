@@ -1685,9 +1685,6 @@ class RealtimePipelineMixin:
                     self._indexed_files.add(normalized)
                     self._file_condition.notify_all()
 
-                # Clear event dedup entry so future modifications aren't suppressed
-                self._recent_file_events.pop(str(file_path), None)
-
                 # If we skipped embeddings, queue for embedding generation
                 if skip_embeddings:
                     await self.add_file(file_path, priority="embed")
@@ -1729,8 +1726,15 @@ class RealtimePipelineMixin:
         active_change_path: str,
         processing_error: Exception | None,
     ) -> None:
-        """End a change's active span; the only place an active path is released."""
+        """End a change's active span; the only place an active path is released.
+
+        The path's duplicate-event record goes with it on every exit: once the
+        path is no longer active, a same-type write inside the dedup window
+        would otherwise be suppressed, and after a failed or skipped attempt
+        nothing else would index it (TFS 65788).
+        """
         self._active_change_generations.pop(active_change_path, None)
+        self._recent_file_events.pop(str(file_path), None)
         await self._drain_reserved_follow_up_change(
             file_path,
             normalized_path=active_change_path,
