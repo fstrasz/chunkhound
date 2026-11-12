@@ -1,17 +1,27 @@
 """ChunkHound reads pathspec's compiled patterns to decide directories as git does.
 
-pathspec has no upper version bound. If its pattern objects change shape, the
-rules degrade to pathspec's own matching (no pruning, no git-exact
-re-includes) and log a warning; these tests fail first so the change is seen.
-They compile with the installed pathspec, so they guard whichever version the
-lock resolves (0.12 spells a regex's tail "(?:(?P<ps_d>/).*)?$", 1.x
-"(?:(?P<ps_d>/)|$)" and matches with re.search).
+pathspec is bounded below 2 (pathspec 1.x deprecates GitWildMatchPattern, the
+class the engine compiles with), but any release inside the bound may still
+change its pattern objects. If they change shape, the rules degrade to
+pathspec's own matching (no pruning, no git-exact re-includes) and log a
+warning; these tests fail first so the change is seen. They compile with the
+installed pathspec, so they guard whichever version the lock resolves (0.12
+spells a regex's tail "(?:(?P<ps_d>/).*)?$", 1.x "(?:(?P<ps_d>/)|$)" and
+matches with re.search).
 """
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from importlib.metadata import version
 from pathlib import Path
+from types import ModuleType
 
+import pytest
+from packaging.requirements import Requirement
+
+import chunkhound.utils.ignore_engine as ignore_engine
 from chunkhound.utils.ignore_engine import (
     _compile_gitignore_lines,
     _compile_gitwildmatch,
@@ -19,6 +29,13 @@ from chunkhound.utils.ignore_engine import (
     _transform_gitignore_line,
     build_repo_aware_ignore_engine,
 )
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
+_PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 
 # Every form a .gitignore line takes: plain file, glob, anchored, directory,
 # negation, and the whole-tree wildcards.
@@ -106,3 +123,53 @@ def test_a_plain_file_pattern_keeps_ignored_directories_pruned(tmp_path: Path) -
     assert engine.matches(root / "src" / "Thumbs.db", is_dir=False)
     assert engine.matches(root / "src" / "debug.log", is_dir=False)
     assert not engine.matches(root / "src" / "app.py", is_dir=False)
+
+
+def test_pathspec_bound_excludes_releases_without_gitwildmatch() -> None:
+    """An install cannot resolve a pathspec without GitWildMatchPattern (TFS 65865).
+
+    pathspec 1.x deprecates the class; a 2.x may remove it, and an unbounded
+    requirement would let the next tool install take it and stop every index.
+    """
+    project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
+    (requirement,) = [
+        req
+        for req in map(Requirement, project["dependencies"])
+        if req.name == "pathspec"
+    ]
+
+    assert requirement.specifier.contains("0.12.1")
+    assert requirement.specifier.contains("1.1.1")
+    assert not requirement.specifier.contains("2.0.0")
+
+
+def test_a_pathspec_without_gitwildmatch_is_named_in_the_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error names the missing class and the installed pathspec (TFS 65865).
+
+    Loads a separate copy of the engine module against a pathspec whose
+    gitwildmatch module has no GitWildMatchPattern, as a release that removed
+    it would look.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "pathspec.patterns.gitwildmatch",
+        ModuleType("pathspec.patterns.gitwildmatch"),
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_ignore_engine_without_gitwildmatch", ignore_engine.__file__
+    )
+    assert spec is not None and spec.loader is not None
+    engine_module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, engine_module)
+    spec.loader.exec_module(engine_module)
+
+    with pytest.raises(RuntimeError) as raised:
+        engine_module.build_ignore_engine(
+            tmp_path, ["config"], config_exclude=["*.log"]
+        )
+
+    message = str(raised.value)
+    assert "GitWildMatchPattern" in message
+    assert f"pathspec {version('pathspec')}" in message

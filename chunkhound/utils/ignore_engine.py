@@ -7,14 +7,17 @@ import re
 import shutil
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from importlib import metadata
 from pathlib import Path
 
 from loguru import logger
 
+_PATHSPEC_IMPORT_ERROR: Exception | None = None
 try:
     from pathspec import PathSpec
     from pathspec.patterns.gitwildmatch import GitWildMatchPattern
-except Exception:  # pragma: no cover - import error surfaced at runtime
+except Exception as exc:  # import error surfaced when an engine is built
+    _PATHSPEC_IMPORT_ERROR = exc
     PathSpec = None  # type: ignore
     GitWildMatchPattern = None  # type: ignore
 
@@ -359,11 +362,29 @@ class IgnoreEngine:
         return None
 
 
+def _pathspec_unavailable_message() -> str:
+    """Say which pathspec name IgnoreEngine could not import, and from which version."""
+    try:
+        installed = f"pathspec {metadata.version('pathspec')}"
+    except metadata.PackageNotFoundError:
+        installed = "no installed pathspec"
+    return (
+        "IgnoreEngine compiles patterns with "
+        "pathspec.patterns.gitwildmatch.GitWildMatchPattern, which "
+        f"{installed} does not provide ({_PATHSPEC_IMPORT_ERROR!r}); "
+        "install a pathspec release within ChunkHound's declared range"
+    )
+
+
 def _compile_gitwildmatch(patterns: Iterable[str]) -> PathSpec:
+    """Compile gitwildmatch patterns.
+
+    Raises:
+        RuntimeError: pathspec or its GitWildMatchPattern could not be imported;
+            the message names the class and the installed pathspec version.
+    """
     if PathSpec is None or GitWildMatchPattern is None:
-        raise RuntimeError(
-            "pathspec is required for IgnoreEngine; please add dependency 'pathspec'"
-        )
+        raise RuntimeError(_pathspec_unavailable_message())
     return PathSpec.from_lines(GitWildMatchPattern, patterns)
 
 
