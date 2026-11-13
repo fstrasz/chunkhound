@@ -5,8 +5,9 @@ Since Python 3.12, ``platform.system()``, ``win32_ver()``, ``machine()`` and
 and fall back to ``sys.getwindowsversion()``, ``cmd /c ver`` and environment
 variables when that raises ``OSError``. Under CPU load a WMI query in a newly
 spawned process can close one of that process's handles after it returns
-(TFS 65866): parse-pool workers that ran ``platform.system()`` while
-importing ChunkHound later failed with ``[WinError 6] The handle is invalid``
+(CPython gh-130727, fixed in 3.13 and 3.14 but not in 3.12; TFS 65866):
+parse-pool workers that ran ``platform.system()`` while importing ChunkHound
+later failed with ``[WinError 6] The handle is invalid``
 releasing their call-queue semaphore, or released the wrong semaphore and
 stalled the pool. Raising ``OSError`` instead sends ``platform`` down its own
 fallback, which reports the same OS for the uses ChunkHound has.
@@ -44,4 +45,4 @@ def disable_platform_wmi_queries() -> None:
             "platform has no _wmi_query; WMI queries are not disabled"
         )
         return
-    platform._wmi_query = _wmi_query_disabled  # type: ignore[attr-defined]
+    platform._wmi_query = _wmi_query_disabled

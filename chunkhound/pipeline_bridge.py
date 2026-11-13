@@ -229,9 +229,11 @@ def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
     There is deliberately no unleased accessor: a caller that submits work
     without a lease could have the pool shut down under it by the idle timer.
 
-    While any lease is held the pool cannot be shut down: the lease count and
-    the idle timer change only under _parse_pool_lock, and the timer callback
-    re-checks both under that lock. Overlapping callers (a start-up scan and a
+    While any lease is held the idle timer cannot shut the pool down: the
+    lease count and the idle timer change only under _parse_pool_lock, and the
+    timer callback re-checks both under that lock. (A pool whose worker died
+    is discarded and shut down while leased; see _discard_broken_parse_pool.
+    Every lease on it fails anyway.) Overlapping callers (a start-up scan and a
     resync in one process) each hold their own lease, so the pool outlives the
     last of them. When the last lease ends, an idle timer starts; a lease that
     begins before it fires cancels it and clears its token.
