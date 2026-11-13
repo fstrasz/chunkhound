@@ -66,6 +66,24 @@ _WINDOWS_PORT_SPAN = 16_384
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = float(os.environ.get("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "60"))
+# First line the proxy writes to daemon.log for each daemon start.
+_DAEMON_LOG_START_MARKER = "===== daemon start "
+
+
+def _keep_previous_daemon_log(log_path: Path) -> None:
+    """Move the previous start's daemon log to daemon.log.1.
+
+    A restart is the usual response to a failed daemon, and that daemon's log
+    is the only record of why it failed (TFS 65866). If the file cannot be
+    moved (on Windows, a daemon that is still exiting may hold it open), the
+    new start appends to it after its own start marker instead.
+    """
+    try:
+        os.replace(log_path, log_path.with_name(f"{log_path.name}.1"))
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        logger.warning(f"Could not keep the previous daemon log {log_path}: {error}")
 
 
 def _canonical_project_dir(project_dir: Path) -> Path:
@@ -573,9 +591,15 @@ class DaemonDiscovery:
         """Return the recent daemon log tail, if one is available."""
         path = log_path or self.get_daemon_log_path()
         try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+        # Only the latest start: a log that could not be rotated keeps the
+        # previous start's output above this start's marker line.
+        _, marker, latest = text.rpartition(_DAEMON_LOG_START_MARKER)
+        if marker:
+            latest = latest.partition("\n")[2]
+        text = latest.strip()
         if not text:
             return None
         return "\n".join(text.splitlines()[-max_lines:])
@@ -1099,7 +1123,12 @@ class DaemonDiscovery:
         # diagnosable (especially on Windows where the IPC transport may fail).
         log_path = self.get_daemon_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "w") as log_file:
+        _keep_previous_daemon_log(log_path)
+        with open(log_path, "a") as log_file:
+            log_file.write(
+                f"{_DAEMON_LOG_START_MARKER}{datetime.now().isoformat()} =====\n"
+            )
+            log_file.flush()
             process = subprocess.Popen(
                 cmd,
                 start_new_session=True,
