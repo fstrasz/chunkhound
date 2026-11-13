@@ -2003,6 +2003,7 @@ class IndexingCoordinator(BaseService):
                     "error": str(e),
                     "pipeline": "rust",
                     "rust_pipeline_error": True,
+                    "transient": e.transient,
                 }
             else:
                 return {
