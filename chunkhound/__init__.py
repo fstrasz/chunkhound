@@ -2,11 +2,10 @@
 # ci: merge queue test
 
 from .platform_guard import disable_platform_wmi_queries
+from .version import __version__
 
 # First, before any module calls platform: see chunkhound/platform_guard.py.
 disable_platform_wmi_queries()
-
-from .version import __version__  # noqa: E402
 
 __author__ = "Ofri Wolfus"
 __description__ = "Local-first semantic code search with vector and regex capabilities"

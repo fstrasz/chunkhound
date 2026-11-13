@@ -284,7 +284,7 @@ def _discard_broken_parse_pool(
             _parse_pool = None
     # _processes is CPython's private worker map; no public API exposes the
     # workers' pids and exit codes.
-    workers = dict(pool._processes or {})
+    workers = dict(getattr(pool, "_processes", None) or {})
     worker_states = ", ".join(
         f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
     )

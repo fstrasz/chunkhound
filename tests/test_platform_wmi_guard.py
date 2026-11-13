@@ -1,9 +1,9 @@
 """Importing ChunkHound keeps ``platform`` off WMI without changing its answers.
 
 A WMI query under load could close a spawned parse worker's call-queue
-semaphore handle (TFS 65866); see chunkhound/platform_guard.py. Each check
-runs in a fresh interpreter, because ``platform`` caches what it learns and
-the guard acts at package import.
+semaphore handle (CPython gh-130727); see chunkhound/platform_guard.py. Each
+check runs in a fresh interpreter, because ``platform`` caches what it learns
+and the guard acts at package import.
 """
 
 import json
@@ -47,6 +47,10 @@ def _run_python(code: str) -> str:
 
 
 def test_a_chunkhound_process_never_queries_wmi_through_platform() -> None:
+    if sys.version_info >= (3, 13, 4):
+        pytest.skip(
+            "CPython 3.13.4 and 3.14.0b2 fixed gh-130727; the guard is off there"
+        )
     try:
         import _wmi  # noqa: F401
     except ImportError:
