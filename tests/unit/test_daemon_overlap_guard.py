@@ -1275,3 +1275,45 @@ def test_start_daemon_subprocess_scrubs_mcp_mode_from_child_env(
     assert "CHUNKHOUND_MCP_MODE" not in env, (
         f"CHUNKHOUND_MCP_MODE leaked into daemon subprocess env: {env}"
     )
+
+
+def test_daemon_start_keeps_the_previous_start_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A new daemon start keeps the previous start's log as daemon.log.1.
+
+    The previous log is the only record of why that daemon failed, and a
+    restart is the usual response to a failure.
+    """
+    import argparse
+
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = discovery.get_daemon_log_path()
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("previous start failed\n", encoding="utf-8")
+
+    class _FakeProcess:
+        pid = 12345
+
+        def poll(self) -> int | None:
+            return None
+
+    def fake_popen(cmd: object, **kwargs: object) -> _FakeProcess:
+        stdout = kwargs["stdout"]
+        assert hasattr(stdout, "write")
+        stdout.write("new start\n")
+        return _FakeProcess()
+
+    monkeypatch.setattr(discovery_module.subprocess, "Popen", fake_popen)
+
+    args = argparse.Namespace(command="_daemon", verbose=False, debug=False)
+    discovery._start_daemon_subprocess(args, socket_path="tcp:127.0.0.1:54999")
+
+    previous = log_path.with_name("daemon.log.1")
+    assert previous.read_text(encoding="utf-8") == "previous start failed\n"
+    current = log_path.read_text(encoding="utf-8")
+    assert "new start" in current
+    assert "previous start failed" not in current
