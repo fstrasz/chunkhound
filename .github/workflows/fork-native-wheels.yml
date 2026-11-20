@@ -1,0 +1,215 @@
+name: Fork native wheels
+
+# FORK-ONLY (fstrasz/chunkhound). Builds chunkhound-native wheels for Linux
+# x86_64 (manylinux_2_31) and Windows x86_64 from a fork commit, checks each
+# one installs with the chunkhound package from that same commit, and attaches
+# both wheels plus SHA256SUMS to a fork GitHub release. Never publishes to
+# PyPI and opens no issues.
+#
+# Trigger: push a branch named ci/native-wheels-<version>-<short-sha>.
+# <short-sha> is the source commit; the branch may add only .github/ changes
+# on top of it (the fork's Rust toolchain pin 7ffde559, and this file).
+# <version> must be a PEP 440 post-release such as 6.1.0.post1: it satisfies
+# chunkhound's `chunkhound-native>=6.1.0`, is not a pre-release, is not a
+# version PyPI carries, and has no local "+label" (GitHub renames special
+# characters in release asset names, which would break a wheel filename).
+#
+# The release is created with GITHUB_TOKEN on purpose: events made with that
+# token start no workflow runs, so the fork's release.yml (on: release
+# published) and its PyPI publish jobs do not run.
+#
+# The release TAG goes on this build commit, never on the source commit. The
+# chunkhound package takes its version from `git describe` (hatch-vcs), which
+# picks the nearest tag that contains a digit, so a native-* tag on the source
+# commit makes every `chunkhound @ git+...@<source>` install fail ("Can't
+# parse version from tag"). That happened to the first release (2026-11-20). The
+# build commit only adds CI files and is on no other branch, so no installable
+# commit has the tag in its history. After releasing, fork-native-verify.yml
+# installs from the public release the way consumers do.
+
+on:
+  push:
+    branches: ['ci/native-wheels-*']
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      cargo_version: ${{ steps.parse.outputs.cargo_version }}
+      source_sha: ${{ steps.parse.outputs.source_sha }}
+      tag: ${{ steps.parse.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Parse the branch name and check the build tree
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          rest="${GITHUB_REF_NAME#ci/native-wheels-}"
+          version="${rest%-*}"
+          short="${rest##*-}"
+          if [[ ! "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.post([0-9]+)$ ]]; then
+            echo "::error::version '$version' is not X.Y.Z.postN"
+            exit 1
+          fi
+          # Cargo needs SemVer; maturin normalizes 6.1.0-post1 to 6.1.0.post1.
+          cargo_version="${BASH_REMATCH[1]}-post${BASH_REMATCH[2]}"
+          source_sha="$(git rev-parse --verify "${short}^{commit}")"
+          git merge-base --is-ancestor "$source_sha" HEAD || {
+            echo "::error::$source_sha is not an ancestor of this branch"
+            exit 1
+          }
+          non_ci="$(git diff --name-only "$source_sha" HEAD | grep -v '^\.github/' || true)"
+          if [[ -n "$non_ci" ]]; then
+            echo "::error::the branch changes files outside .github/ relative to $source_sha"
+            echo "$non_ci"
+            exit 1
+          fi
+          # The release tag goes on HEAD (see header), so HEAD must be a CI-only
+          # commit that no other branch contains.
+          if [[ "$(git rev-parse HEAD)" == "$source_sha" ]]; then
+            echo "::error::HEAD is the source commit; the tag would land in installable history"
+            exit 1
+          fi
+          others="$(git branch -r --contains HEAD | sed 's/^[* ]*//' | grep -v -x "origin/${GITHUB_REF_NAME}" || true)"
+          if [[ -n "$others" ]]; then
+            echo "::error::HEAD is also on other branches, so the tag would reach their history:"
+            echo "$others"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "cargo_version=$cargo_version"
+            echo "source_sha=$source_sha"
+            echo "tag=native-$version-${source_sha:0:8}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      NATIVE_VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set the native wheel version in Cargo.toml
+        shell: bash
+        env:
+          CARGO_VERSION: ${{ needs.meta.outputs.cargo_version }}
+        run: |
+          set -euo pipefail
+          sed -i -E "0,/^version = \".*\"/s//version = \"${CARGO_VERSION}\"/" Cargo.toml
+          first="$(grep -m1 '^version' Cargo.toml)"
+          echo "$first"
+          [[ "$first" == "version = \"${CARGO_VERSION}\"" ]]
+
+      - name: Build native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+
+      - name: Check the wheel installs with chunkhound from the source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=("$PWD"/dist/chunkhound_native-"$NATIVE_VERSION"-*.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            ls -la dist
+            echo "::error::expected exactly one chunkhound_native-$NATIVE_VERSION wheel"
+            exit 1
+          fi
+          workspace="$PWD"
+          # Run outside the repo so the source-tree chunkhound_native stub
+          # cannot shadow the installed wheel.
+          cd "$(mktemp -d)"
+          # The Aditus install shape: chunkhound from git at the source commit,
+          # the native wheel by path. uv enforces chunkhound's
+          # chunkhound-native>=6.1.0 against this wheel's version.
+          uv run --no-project --python 3.12 \
+            --with "chunkhound @ git+https://github.com/${GITHUB_REPOSITORY}@${SOURCE_SHA}" \
+            --with "${wheels[0]}" \
+            python -c "import importlib.metadata as m, os, chunkhound, chunkhound_native as n; v = m.version('chunkhound-native'); print('chunkhound', m.version('chunkhound'), 'chunkhound-native', v, n.__file__); assert v == os.environ['NATIVE_VERSION'], v"
+          uv run --no-project --python 3.12 \
+            --with "chunkhound @ git+https://github.com/${GITHUB_REPOSITORY}@${SOURCE_SHA}" \
+            --with "${wheels[0]}" \
+            python "$workspace/scripts/smoke_test_native_wheel.py"
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-native-${{ matrix.os }}
+          path: dist/chunkhound_native-*.whl
+          if-no-files-found: error
+
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # gh release create, with GITHUB_TOKEN (see header)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NATIVE_VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
+      TAG: ${{ needs.meta.outputs.tag }}
+
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fork-native-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the fork release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          wheels=(chunkhound_native-*.whl)
+          if [[ ${#wheels[@]} -ne 2 ]]; then
+            ls -la
+            echo "::error::expected 2 wheels, found ${#wheels[@]}"
+            exit 1
+          fi
+          sha256sum "${wheels[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          notes="chunkhound-native ${NATIVE_VERSION} built from fstrasz/chunkhound ${SOURCE_SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. The tag is on the build commit ${GITHUB_SHA}, which adds only CI files to ${SOURCE_SHA:0:8}; install chunkhound at ${SOURCE_SHA:0:8}. Fork build, never published to PyPI. Pin each wheel by its SHA256 (SHA256SUMS)."
+          # --target is the build commit, never SOURCE_SHA (see header).
+          gh release create "$TAG" "${wheels[@]}" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "chunkhound-native ${NATIVE_VERSION} (fork, ${SOURCE_SHA:0:8})" \
+            --notes "$notes"
+
+  verify:
+    needs: [meta, release]
+    uses: ./.github/workflows/fork-native-verify.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      source_sha: ${{ needs.meta.outputs.source_sha }}
+      tag: ${{ needs.meta.outputs.tag }}

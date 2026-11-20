@@ -1,0 +1,120 @@
+name: Fork native verify
+
+# FORK-ONLY (fstrasz/chunkhound). Installs a released fork chunkhound-native
+# wheel the way its consumers do, AFTER the release and its tag exist: download
+# from the public release URL, check SHA256SUMS, then `uv tool install` chunkhound
+# from git at the source commit with the wheel, into a fresh tool directory.
+# Checks `chunkhound --version` names the source commit and the native version
+# is the released one.
+#
+# Why after the release: on 2026-11-20 the first release tagged its source
+# commit, hatch-vcs read that tag as chunkhound's version, and every git install
+# at that commit failed. The build job's install check ran before the tag
+# existed and passed.
+#
+# Called by fork-native-wheels.yml after it releases. To re-check an existing
+# release, push ci/native-verify-<X.Y.Z.postN>-<short-sha>.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+  push:
+    branches: ['ci/native-verify-*']
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout code
+        if: ${{ inputs.version == '' }}
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the release to verify
+        id: resolve
+        shell: bash
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_SOURCE_SHA: ${{ inputs.source_sha }}
+          IN_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$IN_VERSION" ]]; then
+            version="$IN_VERSION"; source_sha="$IN_SOURCE_SHA"; tag="$IN_TAG"
+          else
+            rest="${GITHUB_REF_NAME#ci/native-verify-}"
+            version="${rest%-*}"
+            short="${rest##*-}"
+            source_sha="$(git rev-parse --verify "${short}^{commit}")"
+            tag="native-$version-${source_sha:0:8}"
+          fi
+          {
+            echo "version=$version"
+            echo "source_sha=$source_sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      NATIVE_VERSION: ${{ needs.meta.outputs.version }}
+      SOURCE_SHA: ${{ needs.meta.outputs.source_sha }}
+      TAG: ${{ needs.meta.outputs.tag }}
+
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install chunkhound at the source commit with the released wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux) plat=manylinux_2_31_x86_64; py_rel=bin/python ;;
+            Windows) plat=win_amd64; py_rel=Scripts/python.exe ;;
+            *) echo "::error::unsupported runner $RUNNER_OS"; exit 1 ;;
+          esac
+          wheel="chunkhound_native-${NATIVE_VERSION}-cp310-abi3-${plat}.whl"
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          # RUNNER_TEMP is native-form on Windows, so uv.exe reads these env paths as is.
+          work="$RUNNER_TEMP/native-verify"
+          mkdir -p "$work"
+          cd "$work"
+          curl -fsSL --retry 5 -o SHA256SUMS "$base/SHA256SUMS"
+          curl -fsSL --retry 5 -o "$wheel" "$base/$wheel"
+          grep " ${wheel}\$" SHA256SUMS | sha256sum -c -
+          export UV_TOOL_DIR="$work/tools" UV_TOOL_BIN_DIR="$work/bin"
+          uv tool install --python 3.12 \
+            "chunkhound @ git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${SOURCE_SHA}" \
+            --with "$work/$wheel"
+          ver="$("$UV_TOOL_BIN_DIR/chunkhound" --version)"
+          echo "chunkhound --version: $ver"
+          if [[ "$ver" != *"g${SOURCE_SHA:0:9}"* ]]; then
+            echo "::error::chunkhound --version does not name g${SOURCE_SHA:0:9}"
+            exit 1
+          fi
+          "$UV_TOOL_DIR/chunkhound/$py_rel" -I -c "import importlib.metadata as m, chunkhound_native as n; v = m.version('chunkhound-native'); print('chunkhound-native', v, n.__file__); assert v == '${NATIVE_VERSION}', v"
