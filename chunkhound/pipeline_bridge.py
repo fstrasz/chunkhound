@@ -12,10 +12,18 @@ import multiprocessing
 import os
 import threading
 from collections.abc import Callable, Iterator
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    CancelledError,
+    Future,
+    ProcessPoolExecutor,
+    wait,
+)
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
+from multiprocessing.connection import wait as wait_for_sentinels
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
@@ -129,6 +137,14 @@ _parse_pool_idle_timer: threading.Timer | None = None
 # finds a stale token and leaves the pool alone.
 _parse_pool_idle_token: object | None = None
 _parse_pool_atexit_registered = False
+
+# With per-file timeouts disabled, even one legitimate parse with no other
+# completions for 120 s counts as stalled. Exhausted retries set scan_error.
+_PARSE_POOL_STALL_SECONDS = 120.0
+
+
+class _ParsePoolStalled(BrokenProcessPool):
+    """The shared executor produced no file result before the deadline."""
 
 
 def _default_parse_pool_workers() -> int:
@@ -268,9 +284,12 @@ def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
 
 
 def _discard_broken_parse_pool(
-    pool: ProcessPoolExecutor, file_paths: list[str]
+    pool: ProcessPoolExecutor,
+    file_paths: list[str],
+    error: BrokenProcessPool,
+    pending: set[Future],
 ) -> None:
-    """Stop sharing a pool whose worker died, so the next batch gets new workers.
+    """Stop sharing a dead or stalled pool so the next batch gets new workers.
 
     A broken executor fails every later submit, and the idle timer would only
     replace it after _PARSE_POOL_IDLE_SECONDS without a lease (TFS 65866). Logs
@@ -280,19 +299,41 @@ def _discard_broken_parse_pool(
     """
     global _parse_pool
     with _parse_pool_lock:
-        if _parse_pool is pool:
-            _parse_pool = None
+        if _parse_pool is not pool:
+            return
+        _parse_pool = None
     # _processes is CPython's private worker map; no public API exposes the
     # workers' pids and exit codes.
     workers = dict(getattr(pool, "_processes", None) or {})
-    worker_states = ", ".join(
-        f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
-    )
+    if isinstance(error, _ParsePoolStalled):
+        alive = {pid: p.is_alive() for pid, p in workers.items()}
+        for pid, process in workers.items():
+            if alive[pid]:
+                process.kill()
+        deadline = monotonic() + 5.0
+        for process in workers.values():
+            wait_for_sentinels([process.sentinel], max(0.0, deadline - monotonic()))
+        worker_states = ", ".join(
+            f"pid={pid} alive_before={alive[pid]} gone_after={not p.is_alive()}"
+            for pid, p in workers.items()
+        )
+        # Let the manager mark every lease's work broken before shutdown can
+        # cancel pending futures. A wedged manager cannot hold up the retry.
+        _, unfinished = wait(pending, timeout=5.0)
+        for future in unfinished:
+            future.cancel()
+        reason = str(error)
+    else:
+        worker_states = ", ".join(
+            f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
+        )
+        reason = "broke: a worker process died"
     shown = ", ".join(file_paths[:3])
     more = f" (+{len(file_paths) - 3} more)" if len(file_paths) > 3 else ""
     logger.error(
-        "Parse pool broke: a worker process died. Workers: {}. Batch in flight: "
+        "Parse pool {}. Workers: {}. Batch in flight: "
         "{} files: {}{}. Discarding the pool; the next batch starts new workers.",
+        reason,
         worker_states or "none recorded",
         len(file_paths),
         shown,
@@ -300,8 +341,8 @@ def _discard_broken_parse_pool(
     )
     try:
         pool.shutdown(wait=False, cancel_futures=True)
-    except Exception as error:
-        logger.warning("Shutting down the broken parse pool failed: {}", error)
+    except Exception as shutdown_error:
+        logger.warning("Shutting down the broken parse pool failed: {}", shutdown_error)
 
 
 def _shut_down_idle_parse_pool(token: object) -> None:
@@ -691,7 +732,9 @@ def parse_batch_callback(
     The worker pool (see _leased_parse_pool()) is a process-wide singleton,
     reused for every call within one IndexingPipeline.run() and across runs,
     until it has had no batch in flight for _PARSE_POOL_IDLE_SECONDS; the
-    next call then creates a new one (see _leased_parse_pool()).
+    next call then creates a new one (see _leased_parse_pool()). With the
+    per-file timeout disabled, 120 seconds without any result counts as a
+    transient stall, even for a single slow file. Exhausted retries set scan_error.
 
     Args:
         parse_config: The chunkhound_native.ParseCallConfig Rust constructs
@@ -702,14 +745,14 @@ def parse_batch_callback(
             ParseCallConfig has no such field, so run_rust_pipeline() binds
             this from the resolved indexing config via functools.partial
             rather than it flowing through parse_config.
-        on_pool_broken: Called with the BrokenProcessPool when a worker
-            died during this batch, before the error propagates. Rust turns
+        on_pool_broken: Called with the BrokenProcessPool when a worker dies
+            or the batch stalls, before the error propagates. Rust turns
             the error into a plain string, so run_rust_pipeline() binds this
-            to learn that its run failed because of a dead worker.
+            to preserve the transient failure across the Rust boundary.
 
     Raises:
-        BrokenProcessPool: A pool worker died. The pool has been discarded,
-            so the next call starts new workers.
+        BrokenProcessPool: A worker died or the batch stalled. The next call
+            starts new workers.
 
     Returns:
         List of (language, chunks, error, skip_reason) tuples — same order as
@@ -720,15 +763,45 @@ def parse_batch_callback(
     cfg = _ParsePoolConfig.from_any(
         parse_config, index_unknown_files=index_unknown_files
     )
-    args_list = [(p, cfg) for p in file_paths]
+    bound = max(_PARSE_POOL_STALL_SECONDS, 4 * cfg.per_file_timeout_secs)
+    window = 2 * max(1, cfg.parse_thread_pool_size)
+    submitted: list[Future] = []
+    pending: set[Future] = set()
     with _leased_parse_pool(cfg.parse_thread_pool_size) as pool:
         try:
-            return list(pool.map(_parse_one_file, args_list))
+            while len(submitted) < len(file_paths) or pending:
+                with _parse_pool_lock:
+                    if _parse_pool is not pool:
+                        raise BrokenProcessPool("Shared parse pool was discarded")
+                    start = len(submitted)
+                    for path in file_paths[start : start + window - len(pending)]:
+                        future = pool.submit(_parse_one_file, (path, cfg))
+                        pending.add(future)
+                        submitted.append(future)
+                done, pending = wait(
+                    pending, timeout=bound, return_when=FIRST_COMPLETED
+                )
+                if not done:
+                    raise _ParsePoolStalled(f"stalled: no result for {bound:g} s")
+                for future in done:
+                    try:
+                        future.result()
+                    except CancelledError as cancelled:
+                        with _parse_pool_lock:
+                            if _parse_pool is not pool:
+                                raise BrokenProcessPool(
+                                    "Shared parse pool was discarded"
+                                ) from cancelled
+                        raise
+            return [future.result() for future in submitted]
         except BrokenProcessPool as error:
             if on_pool_broken is not None:
                 on_pool_broken(error)
-            _discard_broken_parse_pool(pool, file_paths)
+            _discard_broken_parse_pool(pool, file_paths, error, pending)
             raise
+        finally:
+            for future in pending:
+                future.cancel()
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
