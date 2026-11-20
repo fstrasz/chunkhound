@@ -17,7 +17,6 @@ import itertools
 import os
 import re
 import subprocess
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +33,7 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
+from chunkhound.utils.python_command import python_module_command
 
 _MAX_FETCH_CONCURRENCY = 5
 
@@ -922,8 +922,7 @@ def build_quickresearch_argv_core(
     flag entirely (truthy guard mirrors ``--config``).
     """
     cmd: list[str] = [
-        sys.executable,
-        "-m", "chunkhound.api.cli.main",
+        *python_module_command("chunkhound.api.cli.main"),
         "_quickresearch",
         query,
         str(tmpdir),
