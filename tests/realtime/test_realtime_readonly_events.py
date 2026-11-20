@@ -64,7 +64,7 @@ async def test_read_only_events_take_no_queue_slot(tmp_path: Path) -> None:
     assert [s for s in seen if s[0] != "modified"] == []
 
 
-ProcessFile =Callable[..., Awaitable[dict[str, object]]]
+ProcessFile = Callable[..., Awaitable[dict[str, object]]]
 
 
 def _service_with_handler(
