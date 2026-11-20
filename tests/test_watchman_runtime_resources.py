@@ -144,10 +144,7 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
 def test_build_watchman_runtime_command_prefix_uses_current_interpreter_for_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = replace(
-        resolve_packaged_watchman_runtime(_hydrate_if_missing=False),
-        launch_mode="python_bridge",
-    )
+    runtime = replace(resolve_packaged_watchman_runtime(), launch_mode="python_bridge")
     binary_path = Path("/tmp/watchman")
     monkeypatch.setattr(sys, "executable", "/tmp/chunkhound-python")
 
@@ -167,7 +164,7 @@ def test_build_watchman_runtime_command_prefix_uses_current_interpreter_for_brid
 def test_build_watchman_runtime_command_prefix_uses_binary_for_native_launches() -> (
     None
 ):
-    runtime = resolve_packaged_watchman_runtime(_hydrate_if_missing=False)
+    runtime = resolve_packaged_watchman_runtime()
     native_runtime = replace(runtime, launch_mode="native_binary")
     binary_path = Path("/tmp/native-watchman")
 
