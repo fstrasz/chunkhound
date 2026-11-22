@@ -8,7 +8,7 @@ batch creates a new one.
 """
 
 import os
-import time
+import threading
 from types import SimpleNamespace
 
 import chunkhound.pipeline_bridge as pb
@@ -39,17 +39,28 @@ def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
         first = pb.parse_batch_callback([str(src)], _CFG)
-        pool = pb._parse_pool
-        assert pool is not None
-        workers = list(pool._processes.values())
-        assert workers
+        # The idle timer clears _parse_pool before it calls shutdown(), so the
+        # test waits for shutdown() itself to return (TFS 65874). The wrapper is
+        # installed and the workers are read under the lock the timer takes the
+        # pool under, so both happen before the timer can reach the pool.
+        shut_down = threading.Event()
+        with pb._parse_pool_lock:
+            pool = pb._parse_pool
+            assert pool is not None
+            real_shutdown = pool.shutdown
 
-        deadline = time.monotonic() + 30
-        while pb._parse_pool is not None and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert pb._parse_pool is None, "idle parse pool was never shut down"
+            def shutdown_and_signal(*args, **kwargs):
+                real_shutdown(*args, **kwargs)
+                shut_down.set()
+
+            pool.shutdown = shutdown_and_signal
+            workers = list(pool._processes.values())
+            assert workers
+
+        assert shut_down.wait(60), "idle parse pool shutdown did not finish in 60 s"
+        assert pb._parse_pool is None
+        # shutdown(wait=True) returns only after it has joined every worker.
         for worker in workers:
-            worker.join(10)
             assert not worker.is_alive()
 
         assert pb.parse_batch_callback([str(src)], _CFG) == first
