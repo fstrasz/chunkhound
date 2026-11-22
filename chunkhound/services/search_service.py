@@ -12,6 +12,7 @@ from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from .base_service import BaseService
 from .search.context_retriever import ContextRetriever
 from .search.multi_hop_strategy import MultiHopStrategy
+from .search.reranked_single_hop_strategy import RerankedSingleHopStrategy
 from .search.result_enhancer import ResultEnhancer
 from .search.single_hop_strategy import SingleHopStrategy
 
@@ -49,9 +50,14 @@ class SearchService(BaseService):
                 self._single_hop_strategy.search,
                 config=config,
             )
+            self._reranked_single_hop_strategy = RerankedSingleHopStrategy(
+                embedding_provider,
+                self._single_hop_strategy.search,
+            )
         else:
             self._single_hop_strategy = None
             self._multi_hop_strategy = None
+            self._reranked_single_hop_strategy = None
 
     async def search_semantic(
         self,
@@ -68,10 +74,10 @@ class SearchService(BaseService):
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic search using vector similarity.
 
-        Automatically selects the best search strategy:
-        - Multi-hop + reranking if provider supports reranking
+        Without force_strategy, selects by provider capability:
+        - Reranked single-hop ('single_hop_rerank') if the provider can rerank:
+          one vector search, its top candidates reranked, no expansion
         - Standard single-hop otherwise
-        - Can be overridden with force_strategy parameter
 
         Args:
             query: Natural language search query
@@ -82,9 +88,15 @@ class SearchService(BaseService):
             model: Optional specific model to use
             path_filter: Optional relative path to limit search scope
                 (e.g., 'src/', 'tests/')
-            force_strategy: Optional strategy override ('single_hop', 'multi_hop')
-            time_limit: Optional time limit for multi-hop expansion (default: 5.0s)
-            result_limit: Optional result limit for multi-hop expansion (default: 500, None = unlimited)
+            force_strategy: Optional strategy override: 'single_hop' (vector
+                search only, no reranking), 'single_hop_rerank', or
+                'multi_hop' (expansion with reranking). The reranking
+                strategies fall back to single-hop with a warning when the
+                provider cannot rerank.
+            time_limit: Optional time limit for multi-hop expansion (default: 5.0s);
+                used by 'multi_hop' only
+            result_limit: Optional result limit for multi-hop expansion (default: 500,
+                None = unlimited); used by 'multi_hop' only
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -105,31 +117,35 @@ class SearchService(BaseService):
             # logger.debug(f"Search using provider='{search_provider}', model='{search_model}'")
 
             # Choose search strategy based on force_strategy or provider capabilities
-            use_multi_hop = False
-
-            if force_strategy == "multi_hop":
-                use_multi_hop = True
-            elif force_strategy == "single_hop":
-                use_multi_hop = False
+            can_rerank = (
+                hasattr(embedding_provider, "supports_reranking")
+                and embedding_provider.supports_reranking()
+            )
+            if force_strategy is None:
+                strategy = "single_hop_rerank" if can_rerank else "single_hop"
             else:
-                # Auto-select based on provider capabilities
-                use_multi_hop = (
-                    hasattr(embedding_provider, "supports_reranking")
-                    and embedding_provider.supports_reranking()
+                strategy = force_strategy
+
+            if strategy in ("multi_hop", "single_hop_rerank") and not can_rerank:
+                logger.warning(
+                    f"{strategy} strategy requested but provider doesn't support "
+                    "reranking, falling back to single-hop"
                 )
+                strategy = "single_hop"
 
-            if use_multi_hop:
-                # Ensure provider actually supports reranking for multi-hop
-                if not (
-                    hasattr(embedding_provider, "supports_reranking")
-                    and embedding_provider.supports_reranking()
-                ):
-                    logger.warning(
-                        "Multi-hop strategy requested but provider doesn't support reranking, falling back to single-hop"
-                    )
-                    use_multi_hop = False
-
-            if use_multi_hop:
+            if strategy == "single_hop_rerank":
+                logger.debug(f"Using reranked single-hop search for: '{query}'")
+                assert self._reranked_single_hop_strategy is not None
+                results, pagination = await self._reranked_single_hop_strategy.search(
+                    query=query,
+                    page_size=page_size,
+                    offset=offset,
+                    threshold=threshold,
+                    provider=search_provider,
+                    model=search_model,
+                    path_filter=path_filter,
+                )
+            elif strategy == "multi_hop":
                 logger.debug(f"Using multi-hop search with reranking for: '{query}'")
                 assert self._multi_hop_strategy is not None
                 results, pagination = await self._multi_hop_strategy.search(

@@ -98,9 +98,10 @@ chunkhound search <query> [path] [options]
 
 | Flag | Description |
 |---|---|
-| `--semantic` | Semantic search (default) |
-| `--single-hop` | Force single-hop semantic search |
-| `--multi-hop` | Force multi-hop semantic search |
+| `--semantic` | Semantic search (default): reranked single-hop when the provider can rerank, else single-hop |
+| `--single-hop` | Force single-hop semantic search: one vector search, no reranking |
+| `--single-hop-rerank` | Force reranked single-hop: one vector search, top 90 candidates reranked, no expansion |
+| `--multi-hop` | Force multi-hop semantic search: expansion through similar chunks with reranking, up to a time limit |
 | `--regex` | Regex pattern search (no embeddings required) |
 | `--page-size N` | Results per page (default: 10) |
 | `--offset N` | Pagination offset |

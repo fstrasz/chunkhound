@@ -80,11 +80,15 @@ def _strategy_fixture():
     return services, manager
 
 
-def test_search_schema_exposes_two_strategies():
+def test_search_schema_exposes_three_strategies():
     from chunkhound.mcp_server.tools import TOOL_REGISTRY
 
     params = TOOL_REGISTRY["search"].parameters
-    assert params["properties"]["strategy"]["enum"] == ["single_hop", "multi_hop"]
+    assert params["properties"]["strategy"]["enum"] == [
+        "single_hop",
+        "single_hop_rerank",
+        "multi_hop",
+    ]
     assert "strategy" not in params["required"]
 
 

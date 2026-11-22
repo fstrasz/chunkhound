@@ -101,6 +101,58 @@ async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
+async def test_default_search_reranks_one_vector_search_and_multi_hop_still_expands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TFS 66054: with a reranking provider and no strategy, one vector search
+    is reranked and nothing expands; an explicit multi_hop still expands."""
+    scenario = build_multi_hop_scenario()
+    db, provider = scenario.db, scenario.provider
+    calls = {"search_semantic": 0, "rerank": 0, "find_similar_chunks": 0}
+    db_search, db_expand, rerank = (
+        db.search_semantic,
+        db.find_similar_chunks,
+        provider.rerank,
+    )
+
+    def counted_search(*args, **kwargs):
+        calls["search_semantic"] += 1
+        return db_search(*args, **kwargs)
+
+    def counted_expand(*args, **kwargs):
+        calls["find_similar_chunks"] += 1
+        return db_expand(*args, **kwargs)
+
+    async def counted_rerank(*args, **kwargs):
+        calls["rerank"] += 1
+        return await rerank(*args, **kwargs)
+
+    monkeypatch.setattr(db, "search_semantic", counted_search)
+    monkeypatch.setattr(db, "find_similar_chunks", counted_expand)
+    monkeypatch.setattr(provider, "rerank", counted_rerank)
+    search_service = _build_search_service(db, provider)
+    query = "security validation mechanisms"
+
+    results, pagination = await search_service.search_semantic(query, page_size=10)
+
+    assert calls == {"search_semantic": 1, "rerank": 1, "find_similar_chunks": 0}
+    assert [r["chunk_id"] for r in results] == [1, 5, 6, 7, 8]
+    # Rerank scores, not the vector similarities (0.90, 0.88, ...).
+    assert [r["score"] for r in results] == [0.55, 0.52, 0.51, 0.50, 0.49]
+    assert pagination["total"] == 5
+
+    multi_results, _ = await search_service.search_semantic(
+        query,
+        page_size=10,
+        force_strategy="multi_hop",
+    )
+
+    assert calls["find_similar_chunks"] > 0
+    assert {3, 4} <= {r["chunk_id"] for r in multi_results}
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
 async def test_multi_hop_bridges_predefined_vocabulary_gap() -> None:
     """Multi-hop should recover relevant targets unreachable by single-hop alone."""
     scenario = build_multi_hop_scenario()
@@ -112,7 +164,11 @@ async def test_multi_hop_bridges_predefined_vocabulary_gap() -> None:
         page_size=3,
         force_strategy="single_hop",
     )
-    multi_hop_results, _ = await search_service.search_semantic(query, page_size=3)
+    multi_hop_results, _ = await search_service.search_semantic(
+        query,
+        page_size=3,
+        force_strategy="multi_hop",
+    )
 
     single_ids = {result["chunk_id"] for result in single_hop_results}
     multi_ids = {result["chunk_id"] for result in multi_hop_results}
@@ -136,6 +192,7 @@ async def test_multi_hop_results_are_deduplicated_across_converging_paths() -> N
     results, _ = await search_service.search_semantic(
         "security validation mechanisms",
         page_size=8,
+        force_strategy="multi_hop",
     )
 
     chunk_ids = [result["chunk_id"] for result in results]
@@ -150,11 +207,16 @@ async def test_multi_hop_pagination_is_stable_for_ranked_results() -> None:
     search_service = _build_search_service(scenario.db, scenario.provider)
     query = "security validation mechanisms"
 
-    page_one, pagination_one = await search_service.search_semantic(query, page_size=2)
+    page_one, pagination_one = await search_service.search_semantic(
+        query,
+        page_size=2,
+        force_strategy="multi_hop",
+    )
     page_two, pagination_two = await search_service.search_semantic(
         query,
         page_size=2,
         offset=2,
+        force_strategy="multi_hop",
     )
 
     assert [result["chunk_id"] for result in page_one] == [3, 4], (
@@ -189,6 +251,7 @@ async def test_multi_hop_returns_valid_results_when_rerank_fails() -> None:
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
         page_size=3,
+        force_strategy="multi_hop",
     )
 
     assert [result["chunk_id"] for result in results] == [1, 5, 6], (
@@ -207,6 +270,7 @@ async def test_multi_hop_handles_partial_rerank_results() -> None:
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
         page_size=8,
+        force_strategy="multi_hop",
     )
 
     assert [result["chunk_id"] for result in results] == [2, 1, 5, 6, 7, 8], (
@@ -311,6 +375,7 @@ async def test_multi_hop_terminates_on_result_limit() -> None:
         "security validation mechanisms",
         page_size=10,
         result_limit=2,
+        force_strategy="multi_hop",
     )
 
     chunk_ids = {result["chunk_id"] for result in results}
@@ -340,6 +405,7 @@ async def test_multi_hop_exhaustive_mode_allows_unlimited_results() -> None:
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 8
@@ -357,6 +423,7 @@ async def test_multi_hop_truncates_expansion_to_remaining_result_budget() -> Non
         "security validation mechanisms",
         page_size=10,
         result_limit=6,
+        force_strategy="multi_hop",
     )
 
     assert len(results) == 6
@@ -375,6 +442,7 @@ async def test_multi_hop_terminates_on_time_limit() -> None:
         "security validation mechanisms",
         page_size=10,
         time_limit=0.0,
+        force_strategy="multi_hop",
     )
 
     chunk_ids = {result["chunk_id"] for result in results}
@@ -396,6 +464,7 @@ async def test_multi_hop_terminates_on_insufficient_high_scoring_candidates() ->
     results, pagination = await search_service.search_semantic(
         "insufficient candidates",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 5
@@ -412,6 +481,7 @@ async def test_multi_hop_terminates_when_no_new_candidates() -> None:
     results, pagination = await search_service.search_semantic(
         "graph exhaustion",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 6, (
@@ -437,6 +507,7 @@ async def test_multi_hop_terminates_on_score_drop() -> None:
     results, pagination = await search_service.search_semantic(
         "score drop termination",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 6, (
@@ -463,10 +534,12 @@ async def test_multi_hop_score_drop_fixture_is_repeatable_across_searches() -> N
     first_results, first_pagination = await search_service.search_semantic(
         query,
         page_size=10,
+        force_strategy="multi_hop",
     )
     second_results, second_pagination = await search_service.search_semantic(
         query,
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert first_pagination == second_pagination
@@ -495,6 +568,7 @@ async def test_multi_hop_terminates_on_score_drop_threshold_boundary() -> None:
     results, pagination = await search_service.search_semantic(
         "score drop threshold boundary",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 6
@@ -511,6 +585,7 @@ async def test_multi_hop_terminates_on_low_top_five_floor() -> None:
     results, pagination = await search_service.search_semantic(
         "minimum score termination",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     assert pagination["total"] == 6, (
@@ -539,6 +614,7 @@ async def test_multi_hop_expansion_exhausts_naturally() -> None:
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
         page_size=10,
+        force_strategy="multi_hop",
     )
 
     chunk_ids = {result["chunk_id"] for result in results}

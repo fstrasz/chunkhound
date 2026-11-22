@@ -42,17 +42,31 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
     search_type.add_argument(
         "--semantic",
         action="store_true",
-        help="Perform semantic search (default)",
+        help=(
+            "Perform semantic search (default): reranked single-hop when the "
+            "provider can rerank, else single-hop"
+        ),
     )
     search_type.add_argument(
         "--single-hop",
         action="store_true",
-        help="Force single-hop semantic search",
+        help="Force single-hop semantic search: one vector search, no reranking",
+    )
+    search_type.add_argument(
+        "--single-hop-rerank",
+        action="store_true",
+        help=(
+            "Force reranked single-hop semantic search: one vector search, "
+            "top 90 candidates reranked, no expansion"
+        ),
     )
     search_type.add_argument(
         "--multi-hop",
         action="store_true",
-        help="Force multi-hop semantic search",
+        help=(
+            "Force multi-hop semantic search: expansion through similar chunks "
+            "with reranking, up to a time limit"
+        ),
     )
     search_type.add_argument(
         "--regex",

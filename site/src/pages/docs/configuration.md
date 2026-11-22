@@ -383,7 +383,7 @@ When a newer model supersedes the one in use, an interactive `chunkhound index` 
 |---|---|---|---|
 | `base_url` | `string` | `null` | Custom embedding endpoint. Required for self-hosted OpenAI-compatible embeddings. |
 | `ssl_verify` | `boolean` | `true` | Verify TLS certificates for requests sent to `base_url`. Ignored when `base_url` is unset. |
-| `rerank_model` | `string` | `null` | Reranking model name (enables multi-hop reranking) |
+| `rerank_model` | `string` | `null` | Reranking model name (enables reranked semantic search, the default when set, and multi-hop) |
 | `rerank_url` | `string` | `null` | Separate rerank endpoint URL (optional when reranking is served from `base_url`) |
 | `rerank_ssl_verify` | `boolean` | `null` | Verify TLS certificates for rerank requests. Inherits `ssl_verify` when unset. |
 | `rerank_format` | `string` | `"auto"` | Reranking API format: `cohere`, `tei`, or `auto` |

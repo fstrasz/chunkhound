@@ -76,6 +76,8 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
     force_strategy = None
     if args.single_hop:
         force_strategy = "single_hop"
+    elif args.single_hop_rerank:
+        force_strategy = "single_hop_rerank"
     elif args.multi_hop:
         force_strategy = "multi_hop"
 
@@ -86,7 +88,8 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         getattr(args, "last_n_commits", None),
     ]):
         formatter.error(
-            "--commit-range/--commit-hash/--last-n cannot be combined with --single-hop/--multi-hop."
+            "--commit-range/--commit-hash/--last-n cannot be combined with "
+            "--single-hop/--single-hop-rerank/--multi-hop."
         )
         sys.exit(1)
 

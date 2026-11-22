@@ -4127,7 +4127,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 page AS (
                     SELECT chunk_id, similarity
                     FROM candidates
-                    ORDER BY similarity DESC NULLS LAST
+                    ORDER BY similarity DESC NULLS LAST, chunk_id ASC
                     LIMIT ? OFFSET ?
                 ),
                 kept AS (
@@ -4154,7 +4154,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 SELECT total.total_count, hits.*
                 FROM total
                 LEFT JOIN hits ON TRUE
-                ORDER BY hits.similarity DESC
+                ORDER BY hits.similarity DESC, hits.chunk_id ASC
             """
 
             params.extend(keep_params)

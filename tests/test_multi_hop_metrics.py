@@ -52,7 +52,11 @@ async def test_multi_hop_improves_recall_and_mrr_on_synthetic_benchmark() -> Non
             page_size=5,
             force_strategy="single_hop",
         )
-        multi_results, _ = await search_service.search_semantic(query, page_size=5)
+        multi_results, _ = await search_service.search_semantic(
+            query,
+            page_size=5,
+            force_strategy="multi_hop",
+        )
 
         single_recall_total += _recall_at_k(single_results, relevant_ids, 5)
         multi_recall_total += _recall_at_k(multi_results, relevant_ids, 5)
