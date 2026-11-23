@@ -142,7 +142,7 @@ async def test_regex_search_ignores_strategy():
 async def test_unknown_strategy_is_rejected():
     services, manager = _strategy_fixture()
 
-    with pytest.raises(ValueError, match="'single_hop' or 'multi_hop'"):
+    with pytest.raises(ValueError, match="'single_hop', 'single_hop_rerank' or 'multi_hop'"):
         await search_impl(
             services=services,
             embedding_manager=manager,

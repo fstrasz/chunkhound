@@ -1,13 +1,16 @@
 """Reranked single-hop search strategy: one vector search, then one rerank call.
 
-1. One vector search for the top candidates (no neighbour expansion)
-2. Rerank the top RERANK_CANDIDATES with the embedding provider's reranker
-3. Return the reranked candidates, then any further vector results in vector order
+1. One vector search for the top RERANK_CANDIDATES (no neighbour expansion)
+2. Rerank them with the embedding provider's reranker
+3. Paginate over that reranked set; nothing past it is returned
 
 Best for:
 - The default search when the provider can rerank: one embed and one rerank
   call, about half a second, with ranks that do not depend on a time limit
 - Callers that want reranked quality without multi-hop's expansion
+
+It returns at most RERANK_CANDIDATES results. A caller that needs more uses
+single_hop (unreranked, pages through every match) or multi_hop.
 """
 
 from collections.abc import Awaitable, Callable
@@ -17,9 +20,9 @@ from loguru import logger
 
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
-# Candidates handed to the reranker. Fixed, so a page never depends on the
-# page size or offset that asked for it; 90 is the pool the TFS 66054
-# measurements were taken on.
+# Candidates handed to the reranker, and the most results this strategy
+# returns. Fixed, so a page never depends on the page size or offset that
+# asked for it; 90 is the pool the TFS 66054 measurements were taken on.
 RERANK_CANDIDATES = 90
 
 SingleHopSearchFn = Callable[
@@ -54,13 +57,15 @@ class RerankedSingleHopStrategy:
         model: str,
         path_filter: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Vector search, rerank the top RERANK_CANDIDATES, then paginate.
+        """Rerank the top RERANK_CANDIDATES vector results, then paginate them.
 
-        The order is the reranked candidates (rerank score descending, vector
-        rank breaking ties), then vector results beyond RERANK_CANDIDATES in
-        vector order. Each result's ``score`` is its rerank score, or its
-        similarity when it was not reranked; ``threshold`` applies to
-        ``score``. If the rerank call fails, the vector order is returned.
+        The set is ordered by rerank score descending, vector rank breaking
+        ties, and holds at most RERANK_CANDIDATES results; ``total`` counts
+        that set, so every page it promises is reachable. Each result's
+        ``score`` is its rerank score; ``threshold`` applies to ``score``. If
+        the rerank call fails, or leaves a candidate unscored, that candidate
+        keeps its similarity as ``score`` and sorts after every reranked one,
+        in vector order.
 
         Args:
             query: Natural language search query
@@ -74,11 +79,11 @@ class RerankedSingleHopStrategy:
         Returns:
             Tuple of (results, pagination_metadata)
         """
-        candidates, vector_pagination = await self._single_hop_search(
+        candidates, _ = await self._single_hop_search(
             query=query,
-            page_size=max(RERANK_CANDIDATES, offset + page_size),
+            page_size=RERANK_CANDIDATES,
             offset=0,
-            threshold=0.0,
+            threshold=None,
             provider=provider,
             model=model,
             path_filter=path_filter,
@@ -86,37 +91,34 @@ class RerankedSingleHopStrategy:
         for result in candidates:
             result["score"] = result.get("similarity", 0.0)
 
-        head = candidates[:RERANK_CANDIDATES]
         rerank_scores: dict[int, float] = {}
-        if head:
+        if candidates:
             try:
                 rerank_results = await self._embedding_provider.rerank(
                     query=query,
-                    documents=[result["content"] for result in head],
-                    top_k=len(head),
+                    documents=[result["content"] for result in candidates],
+                    top_k=len(candidates),
                 )
                 for rerank_result in rerank_results:
-                    if 0 <= rerank_result.index < len(head):
+                    if 0 <= rerank_result.index < len(candidates):
                         rerank_scores[rerank_result.index] = rerank_result.score
             except Exception as e:
                 logger.warning(f"Reranking failed, returning vector order: {e}")
 
         for index, score in rerank_scores.items():
-            head[index]["score"] = score
+            candidates[index]["score"] = score
         # Reranked rows first, then by rerank score, then by vector rank, so
         # equal scores keep one order across identical runs.
         order = sorted(
-            range(len(head)),
+            range(len(candidates)),
             key=lambda i: (i not in rerank_scores, -rerank_scores.get(i, 0.0), i),
         )
-        ranked = [head[i] for i in order] + candidates[RERANK_CANDIDATES:]
+        ranked = [candidates[i] for i in order]
 
         if threshold is not None:
             ranked = [r for r in ranked if r["score"] >= threshold]
-            total = len(ranked)
-        else:
-            total = vector_pagination.get("total", len(ranked))
 
+        total = len(ranked)
         page = ranked[offset : offset + page_size]
         has_more = offset + page_size < total
         pagination = {
@@ -128,6 +130,7 @@ class RerankedSingleHopStrategy:
         }
         logger.info(
             f"Reranked single-hop search completed: {len(page)} results returned "
-            f"({len(rerank_scores)}/{len(head)} candidates reranked, {total} total)"
+            f"({len(rerank_scores)}/{len(candidates)} candidates reranked, "
+            f"{total} total)"
         )
         return page, pagination
