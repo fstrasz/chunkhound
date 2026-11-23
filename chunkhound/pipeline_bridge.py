@@ -286,6 +286,7 @@ def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
 def _discard_broken_parse_pool(
     pool: ProcessPoolExecutor,
     file_paths: list[str],
+    submitted: list[Future],
     error: BrokenProcessPool,
     pending: set[Future],
 ) -> None:
@@ -293,15 +294,26 @@ def _discard_broken_parse_pool(
 
     A broken executor fails every later submit, and the idle timer would only
     replace it after _PARSE_POOL_IDLE_SECONDS without a lease (TFS 65866). Logs
-    each worker's pid and exit code and the batch that was in flight; the
-    worker list is read before shutdown(), which drops it. A shutdown error is
-    logged, never raised, so it cannot replace the BrokenProcessPool.
+    each worker's pid and exit code and the batch's unfinished files (TFS
+    66212); the worker list is read before shutdown(), which drops it. A
+    shutdown error is logged, never raised, so it cannot replace the
+    BrokenProcessPool.
     """
     global _parse_pool
     with _parse_pool_lock:
         if _parse_pool is not pool:
             return
         _parse_pool = None
+    # submitted lines up with the prefix of file_paths. A future that raised
+    # means the pool failed, not the file (_parse_one_file reports per-file
+    # errors in its result), so it is unfinished too. Read before the stall
+    # branch cancels anything. cancelled() first: exception() raises on a
+    # cancelled future, and blocks on one that is not done.
+    unfinished_paths = [
+        path
+        for path, future in zip(file_paths, submitted)
+        if not future.done() or future.cancelled() or future.exception() is not None
+    ]
     # _processes is CPython's private worker map; no public API exposes the
     # workers' pids and exit codes.
     workers = dict(getattr(pool, "_processes", None) or {})
@@ -328,16 +340,20 @@ def _discard_broken_parse_pool(
             f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
         )
         reason = "broke: a worker process died"
-    shown = ", ".join(file_paths[:3])
-    more = f" (+{len(file_paths) - 3} more)" if len(file_paths) > 3 else ""
+    shown = ", ".join(unfinished_paths[:3])
+    hidden = len(unfinished_paths) - 3
+    more = f" (+{hidden} more)" if hidden > 0 else ""
     logger.error(
-        "Parse pool {}. Workers: {}. Batch in flight: "
-        "{} files: {}{}. Discarding the pool; the next batch starts new workers.",
+        "Parse pool {}. Workers: {}. Batch in flight: {} files, {} unfinished: "
+        "{}{}; {} never submitted. Discarding the pool; the next batch starts "
+        "new workers.",
         reason,
         worker_states or "none recorded",
         len(file_paths),
+        len(unfinished_paths),
         shown,
         more,
+        len(file_paths) - len(submitted),
     )
     try:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -797,7 +813,7 @@ def parse_batch_callback(
         except BrokenProcessPool as error:
             if on_pool_broken is not None:
                 on_pool_broken(error)
-            _discard_broken_parse_pool(pool, file_paths, error, pending)
+            _discard_broken_parse_pool(pool, file_paths, submitted, error, pending)
             raise
         finally:
             for future in pending:

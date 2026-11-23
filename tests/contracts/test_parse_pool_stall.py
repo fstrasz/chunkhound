@@ -2,6 +2,7 @@
 
 import multiprocessing
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from concurrent.futures.process import BrokenProcessPool
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import psutil
 import pytest
+from loguru import logger
 
 import chunkhound.pipeline_bridge as bridge
 
@@ -19,6 +21,42 @@ def _block_worker(ready: _ConnectionBase, release: Semaphore) -> None:
     ready.send(os.getpid())
     ready.close()
     release.acquire()
+
+
+def _parse_or_hang(
+    args: tuple[str, object],
+) -> tuple[str, list[dict], str | None, str | None]:
+    if args[0].endswith(".hang"):
+        time.sleep(60)
+    return ("text", [], None, None)
+
+
+def test_a_stall_log_names_the_unfinished_files_not_the_batch_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge._shut_down_parse_pool_at_exit()
+    with ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    ) as pool:
+        monkeypatch.setattr(bridge, "_new_parse_pool_locked", lambda _: pool)
+        monkeypatch.setattr(bridge, "_parse_one_file", _parse_or_hang)
+        monkeypatch.setattr(bridge, "_PARSE_POOL_STALL_SECONDS", 2.0)
+        errors: list[str] = []
+        sink = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+        try:
+            # Start the worker and import this module there before the bound runs.
+            pool.submit(_parse_or_hang, ("warm", None)).result(timeout=30)
+            with pytest.raises(bridge._ParsePoolStalled):
+                bridge.parse_batch_callback(
+                    ["done-a", "done-b", "done-c", "stuck-d.hang"]
+                )
+        finally:
+            logger.remove(sink)
+            bridge._shut_down_parse_pool_at_exit()
+    report = "\n".join(errors)
+    assert "no result for 2 s" in report
+    assert "1 unfinished: stuck-d.hang;" in report
+    assert "done-a" not in report
 
 
 def test_a_stalled_batch_reports_a_transient_pool_failure_and_replaces_its_worker(
