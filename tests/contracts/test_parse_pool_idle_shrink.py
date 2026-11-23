@@ -33,20 +33,19 @@ def _reset_pool() -> None:
 
 def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     _reset_pool()
-    # Long enough that the lease-free reads below cannot race the timer.
+    # Short, so the test is quick. The idle timer starts only when the last lease
+    # ends, and the test holds its own lease while it reads each pool.
     monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0, raising=False)
     src = tmp_path / "a.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
-        first = pb.parse_batch_callback([str(src)], _CFG)
         # The idle timer clears _parse_pool before it calls shutdown(), so the
-        # test waits for shutdown() itself to return (TFS 65874). The wrapper is
-        # installed and the workers are read under the lock the timer takes the
-        # pool under, so both happen before the timer can reach the pool.
+        # test waits for shutdown() itself to return (TFS 65874). The test's
+        # lease keeps the timer from starting until the wrapper is installed and
+        # the workers are read.
         shut_down = threading.Event()
-        with pb._parse_pool_lock:
-            pool = pb._parse_pool
-            assert pool is not None
+        with pb._leased_parse_pool(_CFG.parse_thread_pool_size) as pool:
+            first = pb.parse_batch_callback([str(src)], _CFG)
             real_shutdown = pool.shutdown
 
             def shutdown_and_signal(*args, **kwargs):
@@ -63,8 +62,9 @@ def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
         for worker in workers:
             assert not worker.is_alive()
 
-        assert pb.parse_batch_callback([str(src)], _CFG) == first
-        assert pb._parse_pool is not None and pb._parse_pool is not pool
+        with pb._leased_parse_pool(_CFG.parse_thread_pool_size) as new_pool:
+            assert pb.parse_batch_callback([str(src)], _CFG) == first
+            assert new_pool is not pool
     finally:
         _reset_pool()
 
