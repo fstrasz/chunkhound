@@ -292,8 +292,21 @@ class SimpleEventHandler:
         # pay for path resolution.
         in_tree = _in_tree_path(event.src_path)
 
-        # Simple filtering for supported file types, with a shared
-        # previously-indexed delete exception for cleanup correctness.
+        # A delete is recorded before admission: admitting a delete the path
+        # filter rejects asks the database whether the file was indexed, which
+        # can wait on the database, and a status read must count the event as
+        # of its arrival (TFS 65773). Admission of any other event answers from
+        # the path alone, so it is decided first and a rejected one is
+        # recorded in one call.
+        if event_type == "deleted":
+            self._record_source_event(event_type, in_tree)
+            if not self._should_admit_event(event_type, in_tree):
+                self._record_filtered_event(event_type, in_tree)
+                return
+            self._queue_admitted(event_type, in_tree)
+            return
+
+        # Simple filtering for supported file types.
         if not self._should_admit_event(event_type, in_tree):
             self._record_rejected_event(event_type, in_tree)
             return

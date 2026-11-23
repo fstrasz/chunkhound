@@ -50,7 +50,17 @@ async def test_excluded_burst_costs_one_loop_crossing_per_event(
         indexing={"realtime_backend": "watchdog"},
         target_dir=root,
     )
-    service = RealtimeIndexingService(SimpleNamespace(provider=None), config)
+    # The database is the external boundary: note how many crossings had been
+    # made each time it is asked whether a file was indexed.
+    crossings_at_lookup: list[int] = []
+
+    def get_file_by_path(_path: str) -> None:
+        crossings_at_lookup.append(counting.crossings)
+
+    service = RealtimeIndexingService(
+        SimpleNamespace(provider=SimpleNamespace(get_file_by_path=get_file_by_path)),
+        config,
+    )
     loop = asyncio.get_running_loop()
     counting = _CountingLoop(loop)
 
@@ -86,3 +96,15 @@ async def test_excluded_burst_costs_one_loop_crossing_per_event(
     status = service.health_snapshot()
     assert status["pipeline"]["filtered_event_count"] == _BURST
     assert status["event_queue"]["accepted"] == 1
+
+    # An excluded delete asks the database, which can wait; its source record
+    # has crossed before that, so a status read counts it (TFS 65773).
+    crossings_before_delete = counting.crossings
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="deleted",
+            is_directory=False,
+            src_path=str(root / "node_modules" / "pkg" / "gone.js"),
+        )
+    )
+    assert crossings_at_lookup == [crossings_before_delete + 1]
