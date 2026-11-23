@@ -8,7 +8,7 @@ batch creates a new one.
 """
 
 import os
-import time
+import threading
 from types import SimpleNamespace
 
 import chunkhound.pipeline_bridge as pb
@@ -33,27 +33,38 @@ def _reset_pool() -> None:
 
 def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     _reset_pool()
-    # Long enough that the lease-free reads below cannot race the timer.
+    # Short, so the test is quick. The idle timer starts only when the last lease
+    # ends, and the test holds its own lease while it reads each pool.
     monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0, raising=False)
     src = tmp_path / "a.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
-        first = pb.parse_batch_callback([str(src)], _CFG)
-        pool = pb._parse_pool
-        assert pool is not None
-        workers = list(pool._processes.values())
-        assert workers
+        # The idle timer clears _parse_pool before it calls shutdown(), so the
+        # test waits for shutdown() itself to return (TFS 65874). The test's
+        # lease keeps the timer from starting until the wrapper is installed and
+        # the workers are read.
+        shut_down = threading.Event()
+        with pb._leased_parse_pool(_CFG.parse_thread_pool_size) as pool:
+            first = pb.parse_batch_callback([str(src)], _CFG)
+            real_shutdown = pool.shutdown
 
-        deadline = time.monotonic() + 30
-        while pb._parse_pool is not None and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert pb._parse_pool is None, "idle parse pool was never shut down"
+            def shutdown_and_signal(*args, **kwargs):
+                real_shutdown(*args, **kwargs)
+                shut_down.set()
+
+            pool.shutdown = shutdown_and_signal
+            workers = list(pool._processes.values())
+            assert workers
+
+        assert shut_down.wait(60), "idle parse pool shutdown did not finish in 60 s"
+        assert pb._parse_pool is None
+        # shutdown(wait=True) returns only after it has joined every worker.
         for worker in workers:
-            worker.join(10)
             assert not worker.is_alive()
 
-        assert pb.parse_batch_callback([str(src)], _CFG) == first
-        assert pb._parse_pool is not None and pb._parse_pool is not pool
+        with pb._leased_parse_pool(_CFG.parse_thread_pool_size) as new_pool:
+            assert pb.parse_batch_callback([str(src)], _CFG) == first
+            assert new_pool is not pool
     finally:
         _reset_pool()
 
