@@ -22,7 +22,9 @@ from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 # measurements were taken on.
 RERANK_CANDIDATES = 90
 
-SingleHopSearchFn = Callable[..., Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]]
+SingleHopSearchFn = Callable[
+    ..., Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]
+]
 
 
 class RerankedSingleHopStrategy:

@@ -40,24 +40,22 @@ class SearchService(BaseService):
         self._context_retriever = ContextRetriever(database_provider)
 
         # Initialize search strategies
+        self._single_hop_strategy: SingleHopStrategy | None = None
+        self._multi_hop_strategy: MultiHopStrategy | None = None
+        self._reranked_single_hop_strategy: RerankedSingleHopStrategy | None = None
         if embedding_provider:
-            self._single_hop_strategy = SingleHopStrategy(
-                database_provider, embedding_provider
-            )
+            single_hop = SingleHopStrategy(database_provider, embedding_provider)
+            self._single_hop_strategy = single_hop
             self._multi_hop_strategy = MultiHopStrategy(
                 database_provider,
                 embedding_provider,
-                self._single_hop_strategy.search,
+                single_hop.search,
                 config=config,
             )
             self._reranked_single_hop_strategy = RerankedSingleHopStrategy(
                 embedding_provider,
-                self._single_hop_strategy.search,
+                single_hop.search,
             )
-        else:
-            self._single_hop_strategy = None
-            self._multi_hop_strategy = None
-            self._reranked_single_hop_strategy = None
 
     async def search_semantic(
         self,
