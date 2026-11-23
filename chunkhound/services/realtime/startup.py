@@ -855,6 +855,7 @@ class RealtimeStartupMixin:
             source_event_callback=_forward_to_loop(loop, self._record_source_event),
             filtered_event_callback=_forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
+            excluded_event_callback=_forward_to_loop(loop, self._record_excluded_event),
         )
 
         def on_overflow() -> None:

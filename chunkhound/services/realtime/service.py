@@ -813,9 +813,24 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         count_event: bool = False,
         count_coalesced: bool = False,
     ) -> None:
-        normalized_path = str(
-            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+        self._track_event_pressure_key(
+            str(self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)),
+            event_type=event_type,
+            scope=scope,
+            count_event=count_event,
+            count_coalesced=count_coalesced,
         )
+
+    def _track_event_pressure_key(
+        self,
+        normalized_path: str,
+        *,
+        event_type: str | None = None,
+        scope: str | None = None,
+        count_event: bool = False,
+        count_coalesced: bool = False,
+    ) -> None:
+        """``_track_event_pressure`` for a path already normalized as it does."""
         now_monotonic = time.monotonic()
         entry = self._event_pressure_by_path.get(normalized_path)
         if entry is None:
@@ -833,7 +848,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         entry.last_observed_at = self._utc_now()
         entry.last_observed_monotonic = now_monotonic
         self._prune_event_pressure_entry(entry, now_monotonic=now_monotonic)
-        self._trim_event_pressure_state(now_monotonic=now_monotonic)
+        # Trimmed only past twice the bound: trimming on every event re-pruned
+        # and re-ranked every entry, and in a burst of distinct paths (an npm
+        # install) each event is a new entry (TFS 65868). The snapshot trims
+        # before it ranks, so a read still sees at most the bound. Between
+        # trims a path keeps its earlier events in the window where the
+        # per-event trim could have evicted it and restarted its count.
+        trim_above = 2 * self._EVENT_PRESSURE_MAX_TRACKED_PATHS
+        if len(self._event_pressure_by_path) > trim_above:
+            self._trim_event_pressure_state(now_monotonic=now_monotonic)
 
     def _event_pressure_state_for_counts(
         self, *, events_in_window: int, coalesced_updates: int

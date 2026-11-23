@@ -93,6 +93,12 @@ class RealtimePathFilter:
         # The root as an in-tree path (normalized, links not resolved), for
         # the lexical "is this under the root" test of the directory memo.
         self._in_tree_root = Path(os.path.abspath(self._root))
+        # Every path strictly below the root starts with this, compared case-
+        # folded as Windows path equality is. One separator even for a root
+        # that ends in one (C:\, /).
+        self._in_tree_root_prefix = (
+            os.path.normcase(str(self._in_tree_root)).rstrip(os.sep) + os.sep
+        )
 
     @staticmethod
     def _resolve_root(*, config: Config | None, root_path: Path | None) -> Path:
@@ -145,12 +151,17 @@ class RealtimePathFilter:
             return False
 
     def _in_tree_under_root(self, path: Path) -> Path | None:
-        """``path`` normalized without resolving links, if strictly below the root."""
-        in_tree = Path(os.path.abspath(path))
-        if in_tree != self._in_tree_root and in_tree.is_relative_to(
-            self._in_tree_root
-        ):
-            return in_tree
+        """``path`` normalized without resolving links, if strictly below the root.
+
+        A string prefix test: ``Path.is_relative_to`` compares the path with
+        each of its parents, which for a deep node_modules file cost two thirds
+        of the watchdog thread's time per event (TFS 65868).
+        """
+        in_tree = os.path.abspath(path)
+        key = os.path.normcase(in_tree)
+        prefix = self._in_tree_root_prefix
+        if len(key) > len(prefix) and key.startswith(prefix):
+            return Path(in_tree)
         return None
 
     def _directory_excluded(self, dir_path: Path) -> bool:

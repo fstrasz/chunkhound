@@ -110,6 +110,28 @@ class RealtimePipelineMixin:
         )
         self._emit_filtered_status_update()
 
+    def _record_excluded_event(self, event_type: str, file_path: Path | str) -> None:
+        """Record a source event the filter rejected where it arrived.
+
+        Leaves the state ``_record_source_event`` then ``_record_filtered_event``
+        leave, normalizing the path and updating its event pressure once: an
+        npm install sends hundreds of thousands of these (TFS 65868).
+        """
+        normalized_path = str(
+            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+        )
+        self._last_source_event_at = self._utc_now()
+        self._last_source_event_type = event_type
+        self._last_source_event_path = normalized_path
+        self._filtered_event_count += 1
+        self._track_event_pressure_key(
+            normalized_path,
+            event_type=event_type,
+            scope="excluded",
+            count_event=True,
+        )
+        self._emit_filtered_status_update()
+
     def _emit_filtered_status_update(self) -> None:
         """Publish status for a filtered event at most once per interval.
 

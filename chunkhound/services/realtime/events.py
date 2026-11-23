@@ -221,13 +221,20 @@ class SimpleEventHandler:
         source_event_callback: Callable[[str, Path], None] | None = None,
         filtered_event_callback: Callable[[str, Path], None] | None = None,
         admission_callback: AdmissionCallback | None = None,
+        excluded_event_callback: Callable[[str, Path], None] | None = None,
     ):
+        """``excluded_event_callback``, when given, records an event rejected
+        where it arrived in one call, in place of ``source_event_callback``
+        then ``filtered_event_callback``: each callback the service forwards
+        crosses to its event loop, and an install sends hundreds of thousands
+        of rejected events (TFS 65868)."""
         self.event_queue = event_queue
         self.config = config
         self.loop = loop
         self._queue_result_callback = queue_result_callback
         self._source_event_callback = source_event_callback
         self._filtered_event_callback = filtered_event_callback
+        self._excluded_event_callback = excluded_event_callback
         self._admission_callback = admission_callback
         if root_path is not None:
             self._root = root_path.resolve()
@@ -254,11 +261,11 @@ class SimpleEventHandler:
             # node_modules/ into its target outside the root, which no exclude
             # rule matches.
             in_tree = _in_tree_path(event.src_path)
-            self._record_source_event("dir_created", in_tree)
             if self._path_filter.excludes_directory(in_tree):
-                self._record_filtered_event("dir_created", in_tree)
+                self._record_rejected_event("dir_created", in_tree)
                 return
             # Queue directory creation for processing
+            self._record_source_event("dir_created", in_tree)
             self._queue_admitted("dir_created", in_tree)
             return
 
@@ -284,14 +291,14 @@ class SimpleEventHandler:
         # rejected event is never resolved: a burst of excluded events must not
         # pay for path resolution.
         in_tree = _in_tree_path(event.src_path)
-        self._record_source_event(event_type, in_tree)
 
         # Simple filtering for supported file types, with a shared
         # previously-indexed delete exception for cleanup correctness.
         if not self._should_admit_event(event_type, in_tree):
-            self._record_filtered_event(event_type, in_tree)
+            self._record_rejected_event(event_type, in_tree)
             return
 
+        self._record_source_event(event_type, in_tree)
         self._queue_admitted(event_type, in_tree)
 
     def _should_index(self, file_path: Path) -> bool:
@@ -425,5 +432,20 @@ class SimpleEventHandler:
         try:
             if self._filtered_event_callback:
                 self._filtered_event_callback(event_type, file_path)
+        except Exception:
+            pass
+
+    def _record_rejected_event(self, event_type: str, file_path: Path) -> None:
+        """Record an event rejected where it arrived: a source event, filtered.
+
+        Recorded after the decision, at the same point in the event stream, so
+        the owner sees the events in the order they arrived.
+        """
+        if self._excluded_event_callback is None:
+            self._record_source_event(event_type, file_path)
+            self._record_filtered_event(event_type, file_path)
+            return
+        try:
+            self._excluded_event_callback(event_type, file_path)
         except Exception:
             pass

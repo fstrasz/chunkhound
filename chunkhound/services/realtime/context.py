@@ -99,14 +99,14 @@ class RealtimeServiceContext:
         *,
         should_index: bool,
     ) -> bool:
-        self._service._record_source_event(event_type, file_path)
         if not self._service._should_admit_realtime_event(
             event_type,
             file_path,
             should_index=should_index,
         ):
-            self._service._record_filtered_event(event_type, file_path)
+            self._service._record_excluded_event(event_type, file_path)
             return False
+        self._service._record_source_event(event_type, file_path)
         _enqueue_realtime_event(
             self._service.event_queue,
             self._service._handle_queue_result,
