@@ -676,7 +676,9 @@ class LanceDBProvider(SerialDatabaseProvider):
             from chunkhound.core.utils import normalize_path_for_lookup
 
             base_dir = state.get("base_directory")
-            normalized_path = normalize_path_for_lookup(path, base_dir)
+            normalized_path = normalize_path_for_lookup(
+                path, base_dir, resolved_base_dir=self.get_resolved_base_directory()
+            )
             results = (
                 self._files_table.search()
                 .where(f"path = '{normalized_path}'")

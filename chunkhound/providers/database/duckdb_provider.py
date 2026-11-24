@@ -2941,7 +2941,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         from chunkhound.core.utils import normalize_path_for_lookup
 
         base_dir = state.get("base_directory")
-        lookup_path = normalize_path_for_lookup(path, base_dir)
+        lookup_path = normalize_path_for_lookup(
+            path, base_dir, resolved_base_dir=self.get_resolved_base_directory()
+        )
         result = conn.execute(
             """
             SELECT id, path, name, extension, size, modified_time, language, content_hash, created_at, updated_at
@@ -3162,10 +3164,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
 
         base_dir = state.get("base_directory")
+        resolved_base_dir = self.get_resolved_base_directory()
         normalized_paths: list[str] = []
         seen_paths: set[str] = set()
         for file_path in file_paths:
-            normalized_path = normalize_path_for_lookup(file_path, base_dir)
+            normalized_path = normalize_path_for_lookup(
+                file_path, base_dir, resolved_base_dir=resolved_base_dir
+            )
             if normalized_path in seen_paths:
                 continue
             normalized_paths.append(normalized_path)
@@ -4839,6 +4844,16 @@ class DuckDBProvider(SerialDatabaseProvider):
             [directory_prefix, f"{escaped_prefix}/%"],
         )
         return [row["path"] for row in rows if row.get("path")]
+
+    def snapshot_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> frozenset[str]:
+        """Every indexed path at or under ``directory_prefix``, for delete admission.
+
+        A failure raises; it is never reported as an empty directory, which
+        realtime would read as "no file here is indexed" (TFS 66286).
+        """
+        return frozenset(self.list_file_paths_under_directory(directory_prefix))
 
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None

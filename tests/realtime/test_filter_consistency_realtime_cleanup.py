@@ -188,6 +188,92 @@ async def test_watchdog_delete_admits_previously_indexed_excluded_file(
         services.provider.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_excluded_delete_burst_reads_directory_once_and_cleans_indexed_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-install deletes tens of thousands of files under node_modules/. The
+    database is asked about the excluded directory once, not about each file
+    (TFS 66286), and a file indexed there before the exclude still has its row
+    removed when it is deleted."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    db_path = tmp_path / "excluded-burst.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.js"], "realtime_backend": "watchdog"},
+    )
+    services = create_services(db_path, config)
+    provider = services.provider
+    provider.connect()
+    try:
+        stale = root / "node_modules" / "pkg" / "stale.js"
+        _seed_indexed_file(provider, root, stale)
+        service = RealtimeIndexingService(services, config)
+        handler = SimpleEventHandler(
+            service.event_queue,
+            config=config,
+            loop=asyncio.get_running_loop(),
+            root_path=root,
+            queue_result_callback=service._handle_queue_result,
+            source_event_callback=service._record_source_event,
+            filtered_event_callback=service._record_filtered_event,
+            admission_callback=service._should_admit_realtime_event,
+        )
+        # The database is the external boundary: count what it is asked.
+        lookup = provider.get_file_by_path
+        snapshot = provider.snapshot_file_paths_under_directory
+        calls = {"lookup": 0, "snapshot": 0}
+
+        def counted(name: str, fn: Any) -> Any:
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                calls[name] += 1
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        monkeypatch.setattr(provider, "get_file_by_path", counted("lookup", lookup))
+        monkeypatch.setattr(
+            provider,
+            "snapshot_file_paths_under_directory",
+            counted("snapshot", snapshot),
+        )
+
+        def delete(path: Path) -> None:
+            handler.on_any_event(
+                SimpleNamespace(
+                    event_type="deleted", is_directory=False, src_path=str(path)
+                )
+            )
+
+        for i in range(25):
+            delete(root / "node_modules" / "pkg" / f"f{i}.js")
+            delete(root / "node_modules" / "other" / "deep" / f"g{i}.js")
+        await asyncio.sleep(0)
+        assert calls == {"lookup": 0, "snapshot": 1}
+        assert service.event_queue.empty()
+
+        delete(stale)
+        tasks = [
+            asyncio.create_task(service._consume_events()),
+            asyncio.create_task(service._process_loop()),
+        ]
+        try:
+            for _ in range(500):
+                if lookup("node_modules/pkg/stale.js") is None:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert lookup("node_modules/pkg/stale.js") is None
+    finally:
+        provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_watchman_translation_filters_gitignored_worktree_file(

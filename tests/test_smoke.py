@@ -27,6 +27,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import chunkhound
 
+# Guards against a hung CLI (TFS 66275). The CLI runs under this interpreter, not
+# `uv run`, so a cold uv start is not counted and the timeout kills the process
+# that holds the output pipes.
+CLI_HELP_TIMEOUT_SECONDS = 60
+
 
 class TestModuleImports:
     """Test that all modules can be imported without errors."""
@@ -103,7 +108,10 @@ class TestCLICommands:
     def test_cli_help_commands(self, command):
         """Test that CLI help commands work without crashing."""
         result = subprocess.run(
-            ["uv", "run"] + command, capture_output=True, text=True, timeout=5
+            [sys.executable, "-m", "chunkhound.api.cli.main"] + command[1:],
+            capture_output=True,
+            text=True,
+            timeout=CLI_HELP_TIMEOUT_SECONDS,
         )
 
         # Help commands should exit with 0
