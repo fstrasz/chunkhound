@@ -2941,7 +2941,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         from chunkhound.core.utils import normalize_path_for_lookup
 
         base_dir = state.get("base_directory")
-        lookup_path = normalize_path_for_lookup(path, base_dir)
+        lookup_path = normalize_path_for_lookup(
+            path, base_dir, resolved_base_dir=self.get_resolved_base_directory()
+        )
         result = conn.execute(
             """
             SELECT id, path, name, extension, size, modified_time, language, content_hash, created_at, updated_at
@@ -3162,10 +3164,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
 
         base_dir = state.get("base_directory")
+        resolved_base_dir = self.get_resolved_base_directory()
         normalized_paths: list[str] = []
         seen_paths: set[str] = set()
         for file_path in file_paths:
-            normalized_path = normalize_path_for_lookup(file_path, base_dir)
+            normalized_path = normalize_path_for_lookup(
+                file_path, base_dir, resolved_base_dir=resolved_base_dir
+            )
             if normalized_path in seen_paths:
                 continue
             normalized_paths.append(normalized_path)

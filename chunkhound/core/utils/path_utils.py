@@ -3,7 +3,9 @@
 from pathlib import Path
 
 
-def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
+def resolve_path_for_relative(
+    path: Path, base_dir: Path, *, resolved_base_dir: Path | None = None
+) -> tuple[Path, Path]:
     """Resolve path and base_dir for relative_to() computation.
 
     Preserves symlink logical paths (git worktree support).
@@ -12,6 +14,8 @@ def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
     Args:
         path: File path to resolve
         base_dir: Base directory for relative path calculation
+        resolved_base_dir: ``base_dir.resolve()``, computed once by a caller
+            that normalizes many paths against the same base
 
     Returns:
         Tuple of (path_to_use, base_to_use) ready for relative_to()
@@ -20,10 +24,14 @@ def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
         # Keep both unresolved: on macOS /var -> /private/var resolution would
         # make the unresolved symlink path incompatible with a resolved base.
         return path, base_dir
-    return path.resolve(), base_dir.resolve()
+    if resolved_base_dir is None:
+        resolved_base_dir = base_dir.resolve()
+    return path.resolve(), resolved_base_dir
 
 
-def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
+def get_relative_path_safe(
+    path: Path, base_dir: Path, *, resolved_base_dir: Path | None = None
+) -> Path:
     """Get relative path, handling symlinks and platform quirks.
 
     Preserves symlink logical paths (git worktree support).
@@ -32,6 +40,7 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
     Args:
         path: File path (absolute)
         base_dir: Base directory for relative path calculation
+        resolved_base_dir: ``base_dir.resolve()``, if the caller already has it
 
     Returns:
         Relative path from base_dir to path
@@ -40,7 +49,9 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
         ValueError: If path is not under base_dir, or if preserving its logical
             symlink spelling would require an unresolved parent traversal.
     """
-    path_to_use, base_to_use = resolve_path_for_relative(path, base_dir)
+    path_to_use, base_to_use = resolve_path_for_relative(
+        path, base_dir, resolved_base_dir=resolved_base_dir
+    )
     try:
         relative_path = path_to_use.relative_to(base_to_use)
     except ValueError:
@@ -53,7 +64,10 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
 
 
 def normalize_path_for_lookup(
-    input_path: str | Path, base_dir: Path | None = None
+    input_path: str | Path,
+    base_dir: Path | None = None,
+    *,
+    resolved_base_dir: Path | None = None,
 ) -> str:
     """Normalize path for database lookup operations.
 
@@ -68,6 +82,7 @@ def normalize_path_for_lookup(
         input_path: Path to normalize (can be absolute or relative)
         base_dir: Base directory for relative path calculation
             (required for absolute paths)
+        resolved_base_dir: ``base_dir.resolve()``, if the caller already has it
 
     Returns:
         Normalized relative path with forward slashes
@@ -91,7 +106,9 @@ def normalize_path_for_lookup(
         )
 
     try:
-        return get_relative_path_safe(path_obj, base_dir).as_posix()
+        return get_relative_path_safe(
+            path_obj, base_dir, resolved_base_dir=resolved_base_dir
+        ).as_posix()
     except ValueError:
         # Path is not under base_dir - this should not happen in normal operation
         raise ValueError(

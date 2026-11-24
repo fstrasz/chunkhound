@@ -76,6 +76,10 @@ class SerialDatabaseProvider(ABC):
 
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
+        # Its resolved form, computed once per connection: every path lookup
+        # normalizes against it, and resolving it each time made half the
+        # system calls of an excluded delete's lookup (TFS 66286).
+        self._resolved_base_directory: Path | None = None
 
     @abstractmethod
     def _create_connection(self) -> Any:
@@ -129,6 +133,7 @@ class SerialDatabaseProvider(ABC):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema."""
+        self._resolved_base_directory = None
         try:
             # Execute connection in DB thread to ensure proper initialization
             self._execute_in_db_thread_sync("connect")
@@ -223,6 +228,14 @@ class SerialDatabaseProvider(ABC):
     def get_base_directory(self) -> Path:
         """Get the current base directory for path normalization."""
         return self._base_directory
+
+    def get_resolved_base_directory(self) -> Path:
+        """The base directory resolved, computed once per connection."""
+        resolved = self._resolved_base_directory
+        if resolved is None:
+            resolved = self._base_directory.resolve()
+            self._resolved_base_directory = resolved
+        return resolved
 
     def _initialize_shared_instances(self):
         """Initialize service layer components and legacy compatibility objects."""
