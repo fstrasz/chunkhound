@@ -1,4 +1,4 @@
-"""A status read reports the realtime state as of now (TFS 65773).
+"""A status read reports the realtime state as of now.
 
 The realtime service publishes its snapshot only when it records something.
 Between publishes the event queue can drain and time can pass, so a status read

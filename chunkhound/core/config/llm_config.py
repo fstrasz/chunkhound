@@ -141,7 +141,16 @@ LLMProviderLiteral = Literal[
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
+    "api-route",
+    "opper",
+    "obscurify-ai",
+    "atlascloud",
+    "runcrate",
+    "cheapaimodel",
+    "uberllm",
+    "aigrow",
     "opencode-cli",
 ]
 
@@ -181,7 +190,16 @@ CLI_PROVIDER_CHOICES = (
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
+    "api-route",
+    "opper",
+    "obscurify-ai",
+    "atlascloud",
+    "runcrate",
+    "cheapaimodel",
+    "uberllm",
+    "aigrow",
     "opencode-cli",
 )
 
@@ -328,7 +346,8 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Optional directory for claude-code-cli temp files (system-prompt "
-            "file and MCP config). The default is the system temp directory. "
+            "file, MCP config and settings). The default is the system temp "
+            "directory. "
             "Set this for a special case such as Docker or a limited user. "
             "Ignored by every other provider."
         ),
@@ -1019,6 +1038,11 @@ class LLMConfig(BaseSettings):
             # Type-level exhaustiveness check — mypy will flag if a new
             # LLMProviderLiteral variant is added without a matching branch.
             assert_never(provider)
+
+    @staticmethod
+    def requires_explicit_model(provider: LLMProviderLiteral) -> bool:
+        """True when no baked-in default model exists (``llm.model`` mandatory)."""
+        return not all(LLMConfig._get_default_models_for(provider))
 
     def get_default_models(self) -> tuple[str, str]:
         """

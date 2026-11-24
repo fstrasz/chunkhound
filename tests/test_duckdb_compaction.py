@@ -2967,7 +2967,7 @@ class TestRustPipelineGuard:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """TFS 65789: the resync handover can land right after a realtime file
+        """The resync handover can land right after a realtime file
         write's first executor submission. The write must not leave a
         transaction open across that point, so the release succeeds and the
         file is stored."""

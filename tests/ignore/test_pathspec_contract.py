@@ -131,10 +131,11 @@ def test_pathspec_bound_excludes_releases_without_gitwildmatch() -> None:
     pathspec 1.x deprecates the class; a 2.x may remove it, and an unbounded
     requirement would let the next tool install take it and stop every index.
     """
-    project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
+    pyproject = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    hook = pyproject["tool"]["hatch"]["metadata"]["hooks"]["custom"]
     (requirement,) = [
         req
-        for req in map(Requirement, project["dependencies"])
+        for req in map(Requirement, hook["dependencies"])
         if req.name == "pathspec"
     ]
 

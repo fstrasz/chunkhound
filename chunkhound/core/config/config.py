@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chunkhound.core.config._utils import read_json_file
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .analytics_config import AnalyticsConfig
@@ -59,7 +60,7 @@ class ConfigErrorCode(str, Enum):
 # the remote-config terminal delta gate, in addition to the current command.
 # Any new command whose command-scoped gate can be tripped by a
 # remote-pushable value must be added here. `research` stands in for the
-# LLM-requiring commands (`websearch`, `fetchurl`, `_quickresearch`) — its
+# LLM-requiring commands (`websearch`, `fetchurl`) — its
 # LLM validation branch produces the same codes (`LLM_NOT_CONFIGURED`,
 # `LLM_MISSING_ROLE_CONFIG`) they all do, so covering it catches a payload
 # that would remove or break `llm.*` from any low-privilege invocation
@@ -399,11 +400,10 @@ class Config(BaseModel):
 
         if global_config_file:
             try:
-                with open(global_config_file) as f:
-                    global_config = json.load(f)
-                    Config.deep_merge(config_data, global_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
+                global_config = read_json_file(global_config_file)
+                Config.deep_merge(config_data, global_config)
+                self._mark_exclude_user_supplied(config_data)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(
                     f"Invalid JSON in global config file {global_config_file}: {e}. "
                     "Please check the file format and try again."
@@ -421,25 +421,24 @@ class Config(BaseModel):
             if local_config_path.exists() and local_config_path != config_file:
                 config_data["local_config_file"] = local_config_path.resolve()
                 try:
-                    with open(local_config_path) as f:
-                        local_config = json.load(f)
-                        # Trust boundary: remote-config URL/header must come
-                        # from operator-controlled surfaces (CLI or env), never
-                        # from a file — a project-local .chunkhound.json in a
-                        # cloned repo could otherwise redirect the fetch to an
-                        # attacker-controlled URL on first run.
-                        if local_config.pop("remote_config", None) is not None:
-                            log_if_not_mcp(
-                                "WARNING",
-                                "Ignoring 'remote_config' in {} — remote-config "
-                                "URL/auth may only be set via CLI flags, "
-                                "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
-                                "global config file.",
-                                local_config_path,
-                            )
-                        Config.deep_merge(config_data, local_config)
-                        self._mark_exclude_user_supplied(config_data)
-                except json.JSONDecodeError as e:
+                    local_config = read_json_file(local_config_path)
+                    # Trust boundary: remote-config URL/header must come
+                    # from operator-controlled surfaces (CLI or env), never
+                    # from a file — a project-local .chunkhound.json in a
+                    # cloned repo could otherwise redirect the fetch to an
+                    # attacker-controlled URL on first run.
+                    if local_config.pop("remote_config", None) is not None:
+                        log_if_not_mcp(
+                            "WARNING",
+                            "Ignoring 'remote_config' in {} — remote-config "
+                            "URL/auth may only be set via CLI flags, "
+                            "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                            "global config file.",
+                            local_config_path,
+                        )
+                    Config.deep_merge(config_data, local_config)
+                    self._mark_exclude_user_supplied(config_data)
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
                         "Please check the file format and try again."
@@ -456,23 +455,22 @@ class Config(BaseModel):
             )
         if config_file:
             try:
-                with open(config_file) as f:
-                    file_config = json.load(f)
-                    # Trust boundary: see _apply_local_json — same reasoning
-                    # applies to an explicit --config file, which can just as
-                    # easily be a checked-in artifact from an untrusted source.
-                    if file_config.pop("remote_config", None) is not None:
-                        log_if_not_mcp(
-                            "WARNING",
-                            "Ignoring 'remote_config' in {} — remote-config "
-                            "URL/auth may only be set via CLI flags, "
-                            "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
-                            "global config file.",
-                            config_file,
-                        )
-                    Config.deep_merge(config_data, file_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
+                file_config = read_json_file(config_file)
+                # Trust boundary: see _apply_local_json — same reasoning
+                # applies to an explicit --config file, which can just as
+                # easily be a checked-in artifact from an untrusted source.
+                if file_config.pop("remote_config", None) is not None:
+                    log_if_not_mcp(
+                        "WARNING",
+                        "Ignoring 'remote_config' in {} — remote-config "
+                        "URL/auth may only be set via CLI flags, "
+                        "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                        "global config file.",
+                        config_file,
+                    )
+                Config.deep_merge(config_data, file_config)
+                self._mark_exclude_user_supplied(config_data)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(
                     f"Invalid JSON in config file {config_file}: {e}. "
                     "Please check the file format and try again."
@@ -769,11 +767,9 @@ class Config(BaseModel):
                 for item in missing_config
             )
 
-        # websearch only spawns _quickresearch as a subprocess, but we validate
-        # LLM/embedding config in the parent so misconfiguration fails fast
-        # before fetching DDG results and writing tempfiles.
+        # Validate websearch dependencies before fetching remote pages.
         requires_llm = (
-            command in ("research", "websearch", "_quickresearch", "fetchurl")
+            command in ("research", "websearch", "fetchurl")
             or (command == "map" and not getattr(args, "overview_only", False))
             or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
@@ -804,7 +800,7 @@ class Config(BaseModel):
                     )
 
         # Validate embedding provider requirements for commands that index code
-        if command in ("index", "websearch", "_quickresearch"):
+        if command in ("index", "websearch"):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:
@@ -868,11 +864,7 @@ class Config(BaseModel):
                 )
 
         if self.database.read_only:
-            # _quickresearch always uses a :memory: DB (see quickresearch.py),
-            # so a project-level read_only setting inherited via --config is
-            # structurally inapplicable — accept it here and let the connection
-            # manager drop read_only for :memory: paths.
-            if command not in ("mcp", "_quickresearch"):
+            if command != "mcp":
                 errors.append(
                     (
                         ConfigErrorCode.DB_READONLY_WRONG_COMMAND,

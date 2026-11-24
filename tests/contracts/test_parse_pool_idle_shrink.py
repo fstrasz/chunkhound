@@ -23,19 +23,14 @@ _CFG = SimpleNamespace(
 
 
 def _reset_pool() -> None:
-    shut_down = getattr(pb, "_shut_down_parse_pool_at_exit", None)
-    if shut_down is not None:
-        shut_down()
-    elif pb._parse_pool is not None:
-        pb._parse_pool.shutdown(wait=True)
-        pb._parse_pool = None
+    pb._shut_down_parse_pool_at_exit()
 
 
 def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     _reset_pool()
     # Short, so the test is quick. The idle timer starts only when the last lease
     # ends, and the test holds its own lease while it reads each pool.
-    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0, raising=False)
+    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0)
     src = tmp_path / "a.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
@@ -71,11 +66,13 @@ def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
 
 def test_parse_pool_is_never_shut_down_while_leased():
     """Overlapping batches (a scan and a resync) share one pool, an idle-timer
-    callback that runs after a newer batch started (the timer firing as a batch
-    arrives) leaves the pool alone, and only the current timer shuts it down.
-    Timer callbacks are invoked directly, so no real timer decides the outcome
-    (the default 60 s idle time never elapses during the test)."""
+    callback that runs while a newer batch holds a lease, or after it (the
+    timer firing as a batch arrives), leaves the pool alone, and only the
+    current timer shuts it down. Timer callbacks are invoked directly, so no
+    real timer decides the outcome (the default 60 s idle time never elapses
+    during the test)."""
     _reset_pool()
+    current_timer = None
     try:
         with pb._leased_parse_pool(1) as pool:
             with pb._leased_parse_pool(1) as resync_pool:
@@ -87,11 +84,17 @@ def test_parse_pool_is_never_shut_down_while_leased():
         stale = pb._parse_pool_idle_token  # the timer started by that release
         assert stale is not None
         with pb._leased_parse_pool(1):
-            pass
+            pb._shut_down_idle_parse_pool(stale)  # fires while a batch runs
+            assert pb._parse_pool is pool
+        # The direct calls below stand in for the real timer that release
+        # started; it is cancelled at the end so it does not outlive the test.
+        current_timer = pb._parse_pool_idle_timer
         pb._shut_down_idle_parse_pool(stale)  # as if that timer fired late
         assert pb._parse_pool is pool
 
         pb._shut_down_idle_parse_pool(pb._parse_pool_idle_token)
         assert pb._parse_pool is None
     finally:
+        if current_timer is not None:
+            current_timer.cancel()
         _reset_pool()

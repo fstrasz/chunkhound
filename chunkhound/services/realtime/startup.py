@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -25,9 +26,11 @@ from .adapters import (
 )
 from .events import (
     SimpleEventHandler,
+    forward_to_loop,
     ignore_windows_last_access,
     watchdog_event_filter,
 )
+from .inotify_overflow import InotifyOverflowDetection
 
 
 class RealtimeObserver(Protocol):
@@ -50,13 +53,22 @@ class RealtimeObserver(Protocol):
     def join(self, timeout: float | None = ...) -> None: ...
 
 
+@dataclass(frozen=True)
+class WatchdogBootstrap:
+    """A started watchdog observer, ready for the service to adopt."""
+
+    observer: RealtimeObserver
+    event_handler: SimpleEventHandler
+    inotify_overflow_detection: InotifyOverflowDetection
+
+
 def _create_watchdog_observer(
     on_overflow: Callable[[], None],
-) -> tuple[RealtimeObserver, str]:
+) -> tuple[RealtimeObserver, InotifyOverflowDetection]:
     """Import watchdog only inside the watchdog startup path.
 
     Returns the observer and whether a kernel inotify overflow reaches
-    ``on_overflow`` (TFS 65772): "active", "unavailable" (Linux, but no hook
+    ``on_overflow``: "active", "unavailable" (Linux, but no hook
     could be installed) or "not_applicable" (not Linux).
     """
     from .inotify_overflow import create_inotify_observer
@@ -68,25 +80,10 @@ def _create_watchdog_observer(
     from watchdog.observers import Observer
 
     ignore_windows_last_access()
-    detection = "unavailable" if sys.platform.startswith("linux") else "not_applicable"
+    detection: InotifyOverflowDetection = (
+        "unavailable" if sys.platform.startswith("linux") else "not_applicable"
+    )
     return Observer(), detection
-
-
-def _forward_to_loop(
-    loop: asyncio.AbstractEventLoop, callback: Callable[[str, Path], None]
-) -> Callable[[str, Path], None]:
-    """Run an observer-thread event callback on the service's event loop.
-
-    The event loop owns the service's event counters, event-pressure state and
-    status snapshots; the watchdog observer calls back from its own thread.
-    call_soon_threadsafe runs callbacks in the order they were scheduled, so a
-    source event is still recorded before the queueing of the same event.
-    """
-
-    def forward(event_type: str, file_path: Path) -> None:
-        loop.call_soon_threadsafe(callback, event_type, file_path)
-
-    return forward
 
 
 class RealtimeStartupStatusTracker:
@@ -527,23 +524,32 @@ class RealtimeStartupMixin:
         # normalization differences (e.g. macOS /var ↔ /private/var, Windows
         # 8.3 short-name expansion) that can otherwise cause the caller-passed
         # `watch_path` to diverge from the already-validated provider base.
+        # Record this start before awaiting the guard, so a stop() issued while
+        # the guard runs can cancel it. Recording the task touches no watcher or
+        # monitor state.
+        start_task = asyncio.current_task()
+        self._active_start_task = start_task
         provider = getattr(getattr(self, "services", None), "provider", None)
         ensure_root = getattr(provider, "ensure_indexed_root_identity", None)
         if callable(ensure_root):
             get_base = getattr(provider, "get_base_directory", None)
-            requested_root = get_base() if callable(get_base) else watch_path
-            loop = asyncio.get_running_loop()
-            # run_in_executor only forwards positional args; lambda bridges kwargs
-            await loop.run_in_executor(
-                None,
-                lambda: ensure_root(
-                    requested_root=requested_root,
-                    allow_claim_if_missing=True,
-                ),
-            )
+            try:
+                requested_root = get_base() if callable(get_base) else watch_path
+                loop = asyncio.get_running_loop()
+                # run_in_executor only forwards positional args; lambda bridges
+                # kwargs
+                await loop.run_in_executor(
+                    None,
+                    lambda: ensure_root(
+                        requested_root=requested_root,
+                        allow_claim_if_missing=True,
+                    ),
+                )
+            except BaseException:
+                if self._active_start_task is start_task:
+                    self._active_start_task = None
+                raise
 
-        start_task = asyncio.current_task()
-        self._active_start_task = start_task
         self._start_generation += 1
         start_generation = self._start_generation
         self._start_startup_phase("realtime_start")
@@ -709,9 +715,11 @@ class RealtimeStartupMixin:
             )
             if bootstrap_result is None:
                 return
-            observer, event_handler, detection = bootstrap_result
             self._adopt_watchdog_monitor(
-                observer, event_handler, watch_path, detection
+                bootstrap_result.observer,
+                bootstrap_result.event_handler,
+                watch_path,
+                bootstrap_result.inotify_overflow_detection,
             )
         except asyncio.TimeoutError:
             self._watchdog_bootstrap_abort.set()
@@ -746,9 +754,7 @@ class RealtimeStartupMixin:
 
     def _handle_watchdog_bootstrap_done(
         self,
-        future: asyncio.Future[
-            tuple[RealtimeObserver, SimpleEventHandler, str] | None
-        ],
+        future: asyncio.Future[WatchdogBootstrap | None],
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -770,7 +776,7 @@ class RealtimeStartupMixin:
         if bootstrap_result is None:
             return
 
-        observer = bootstrap_result[0]
+        observer = bootstrap_result.observer
         if (
             self._watchdog_bootstrap_abort.is_set()
             or self._using_polling
@@ -803,7 +809,7 @@ class RealtimeStartupMixin:
         observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
-        inotify_overflow_detection: str,
+        inotify_overflow_detection: InotifyOverflowDetection,
     ) -> None:
         """Adopt a successfully bootstrapped watchdog observer into service state."""
         if (
@@ -844,7 +850,7 @@ class RealtimeStartupMixin:
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[RealtimeObserver, SimpleEventHandler, str] | None:
+    ) -> WatchdogBootstrap | None:
         """Create and start a watchdog observer without mutating shared state."""
         event_handler = SimpleEventHandler(
             self.event_queue,
@@ -852,10 +858,10 @@ class RealtimeStartupMixin:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=_forward_to_loop(loop, self._record_source_event),
-            filtered_event_callback=_forward_to_loop(loop, self._record_filtered_event),
+            source_event_callback=forward_to_loop(loop, self._record_source_event),
+            filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
-            excluded_event_callback=_forward_to_loop(loop, self._record_excluded_event),
+            excluded_event_callback=forward_to_loop(loop, self._record_excluded_event),
         )
 
         def on_overflow() -> None:
@@ -891,7 +897,7 @@ class RealtimeStartupMixin:
 
         if observer.is_alive():
             logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
-            return observer, event_handler, detection
+            return WatchdogBootstrap(observer, event_handler, detection)
 
         self._stop_bootstrap_observer(observer)
         raise RuntimeError("Observer failed to start within timeout")
