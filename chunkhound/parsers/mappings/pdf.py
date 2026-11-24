@@ -27,7 +27,7 @@ from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 # PyMuPDF is imported lazily, on the first PDF actually parsed. The import is not
-# free: with `pymupdf-layout` installed (a pymupdf4llm dependency), `import pymupdf`
+# free: PyMuPDF 2.x depends on `pymupdf-layout`, and with it installed `import pymupdf`
 # loads an ONNX layout + table-grid model. `chunkhound.parsers.mappings` imports
 # every mapping, so an eager import here made EVERY parse worker load that model,
 # even for a repo with no PDFs - enough, across a few concurrent indexes, to fail

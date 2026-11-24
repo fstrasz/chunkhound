@@ -43,11 +43,13 @@ from .events import (
     SimpleEventHandler,
     normalize_file_path,
 )
+from .inotify_overflow import InotifyOverflowDetection
 from .pipeline import RealtimePipelineMixin
 from .startup import (
     RealtimeObserver,
     RealtimeStartupMixin,
     RealtimeStartupStatusTracker,
+    WatchdogBootstrap,
     default_realtime_backend_for_current_install,
 )
 from .task_supervision import OwnedTaskSet
@@ -221,7 +223,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._event_queue_overflow_last_cleared_at: str | None = None
         self._event_queue_overflow_sample_event_type: str | None = None
         self._event_queue_overflow_sample_file_path: str | None = None
-        self._inotify_overflow_detection: str | None = None
+        self._inotify_overflow_detection: InotifyOverflowDetection | None = None
         self._inotify_overflow_count = 0
         self._inotify_overflow_last_at: str | None = None
         self._last_source_event_at: str | None = None
@@ -262,8 +264,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler, str] | None]
-            | None
+            asyncio.Future[WatchdogBootstrap | None] | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
@@ -490,7 +491,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                     "sample_file_path": None,
                 },
             },
-            # Kernel inotify queue overflows (TFS 65772). detection: "active",
+            # Kernel inotify queue overflows. detection: "active",
             # "unavailable" (Linux, but no hook: not detected),
             # "not_applicable", or None before a watchdog observer is adopted.
             "inotify_overflow": {
@@ -563,7 +564,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
 
         The status callback publishes a snapshot only when the service records
         something; between publishes the queue can drain and time can pass, so
-        a reader must not rely on the last published one (TFS 65773).
+        a reader must not rely on the last published one.
         """
         return copy.deepcopy(self._build_health_snapshot())
 

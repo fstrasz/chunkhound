@@ -127,8 +127,8 @@ _parse_pool_lock = threading.Lock()
 # The parse pool is only used by bulk parsing (start-up scans, resyncs, `index`);
 # a long-lived MCP server otherwise holds max_workers idle processes for its whole
 # session. Once no parse batch has been in flight for this long, the pool is shut
-# down; the next batch creates a new one. All four names below are guarded by
-# _parse_pool_lock.
+# down; the next batch creates a new one. The four variables below (not the
+# constant) are guarded by _parse_pool_lock.
 _PARSE_POOL_IDLE_SECONDS = 60.0
 _parse_pool_leases = 0
 _parse_pool_idle_timer: threading.Timer | None = None
@@ -372,11 +372,17 @@ def _shut_down_idle_parse_pool(token: object) -> None:
         _parse_pool_idle_timer = None
         _parse_pool_idle_token = None
     if pool is not None:
-        # No lease is held, so no task is in flight on this pool.
+        # No lease is held, so no batch is using this pool; wait=True still
+        # waits for any task a failed batch left running.
         pool.shutdown(wait=True)
 
 
 def _shut_down_parse_pool_at_exit() -> None:
+    """Shut the parse pool down at interpreter exit, cancelling queued tasks.
+
+    Waits for running tasks. Also cancels any pending idle timer and clears its
+    token, leaving no pool and no timer; tests call it to reset that state.
+    """
     global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
     with _parse_pool_lock:
         if _parse_pool_idle_timer is not None:
@@ -881,18 +887,12 @@ def _embedding_native_capabilities(
     return 8191, False, True
 
 
-def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
-    """Use the provider's canonical default instead of crossing ``None``."""
+def _resolved_embedding_model(embedding_cfg: Any) -> str:
+    """Return the configured model, else the provider's canonical default."""
     get_default_model = getattr(embedding_cfg, "get_default_model", None)
     if callable(get_default_model):
         return str(get_default_model())
-    model = _cfg_or(embedding_cfg, "model", "", str)
-    if model:
-        return model
-    return {
-        "openai": "text-embedding-3-small",
-        "voyageai": "voyage-3.5",
-    }.get(provider, "")
+    return _cfg_or(embedding_cfg, "model", "", str)
 
 
 
@@ -912,6 +912,19 @@ def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
     if value is _MISSING or value is None:
         return default
     return cast(value)
+
+
+def rust_mtime_epsilon(config: Any) -> float:
+    """Return the mtime tolerance, in seconds, the Rust differ uses for *config*.
+
+    The single reader of ``indexing.mtime_epsilon_seconds`` for the Rust
+    pipeline and for anything that must agree with its diff (the incremental
+    precheck in chunkhound/services/rust_incremental_precheck.py). An explicit
+    ``0.0`` is honoured as an exact match; only a missing or None value falls
+    back to 0.01.
+    """
+    indexing_cfg = getattr(config, "indexing", None) if config else None
+    return _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
 
 
 async def run_rust_pipeline(
@@ -969,7 +982,7 @@ async def run_rust_pipeline(
     per_file_timeout_min = _cfg_or(
         indexing_cfg, "per_file_timeout_min_size_kb", 128, int
     )
-    mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
+    mtime_eps = rust_mtime_epsilon(config)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
     # Rust's config_file_size_threshold_kb is a u32 — a negative value (the
     # documented "<=0 disables the gate" convention, see batch_processor.py)
@@ -993,7 +1006,7 @@ async def run_rust_pipeline(
     )
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
-    embedding_model = _resolved_embedding_model(embedding_cfg, embedding_provider)
+    embedding_model = _resolved_embedding_model(embedding_cfg)
     (
         embed_max_tokens_per_batch,
         embedding_matryoshka,

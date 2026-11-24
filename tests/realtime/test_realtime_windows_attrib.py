@@ -1,4 +1,4 @@
-"""Every in-place write is indexed, and a plain read costs nothing (TFS 65771).
+"""Every in-place write is indexed, and a plain read costs nothing.
 
 On Windows, watchdog 7 reports a FILE_ACTION_MODIFIED as `attrib` whenever the
 record's change time is ahead of its write time, a race an ordinary append
@@ -105,7 +105,7 @@ async def test_windows_read_raises_no_event_and_write_is_a_change(
 
     queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
     handler, _ = _handler(tmp_path, queue, asyncio.get_running_loop())
-    observer, _detection = startup_module._create_watchdog_observer(lambda: None)
+    observer, _ = startup_module._create_watchdog_observer(lambda: None)
     observer.schedule(
         handler, str(tmp_path), recursive=True, event_filter=watchdog_event_filter()
     )

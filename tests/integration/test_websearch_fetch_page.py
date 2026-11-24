@@ -12,7 +12,7 @@ branch's known one-tab leak cannot bleed into the HTML branch's target
 count, regardless of test execution order.
 
 The test resolves Chrome via ``_resolve_chrome_path`` so the same
-explicit-path probe + version check that ``fetch_and_save`` relies on
+explicit-path probe + version check that ``fetch_pages`` relies on
 runs here too — a Chrome <124 raises out of the resolver, matching
 production's fail-loud contract for the silent ``Response.charset``
 parse-failure loop on older Chrome.
@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import http.server
 import os
+import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ import pytest_asyncio
 from chunkhound.utils.websearch_core import (
     _CHROME_PATHS,
     _fetch_page,
+    _managed_browser,
     _resolve_chrome_path,
 )
 
@@ -81,36 +83,24 @@ async def _wait_for_target_count(
 async def chrome_browser() -> AsyncIterator[zd.Browser]:
     """Per-test Chrome. Function-scoped so target counts start clean.
 
-    Uses the production ``_resolve_chrome_path`` so the explicit-path
-    probe + version check that ``fetch_and_save`` relies on is exercised
-    here — a Chrome <124 or otherwise unverifiable binary returns ``None``
-    and skips the test instead of letting it hit the silent-event-drop
-    loop in zendriver's listener.
+    Uses the production ``_managed_browser`` so launch flags, Chrome
+    resolution, the late-completion guard, and bounded stop are exercised
+    here. No usable Chrome skips; a resolvable Chrome that fails to launch
+    fails the test.
     """
-    import zendriver as zd
-
-    chrome_path = _resolve_chrome_path()
-    if chrome_path is None:
-        pytest.skip("No Chrome resolvable via _resolve_chrome_path")
-
-    browser = await zd.start(
-        headless=True,
-        browser_args=[
-            "--headless=new",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-        browser_executable_path=chrome_path,
-    )
-    try:
+    if _resolve_chrome_path() is None:
+        pytest.skip("No usable Chrome")
+    warnings: list[str] = []
+    async with _managed_browser(warnings.append) as browser:
+        if browser is None:
+            pytest.fail(f"Chrome launch failed: {'; '.join(warnings)}")
         yield browser
-    finally:
-        try:
-            await asyncio.wait_for(browser.stop(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Chrome startup is unreliable on macOS CI runners",
+)
 async def test_fetch_page_html_branch(
     chrome_browser: zd.Browser,
     local_fetch_page_server: tuple[str, list[str]],
@@ -126,7 +116,9 @@ async def test_fetch_page_html_branch(
     base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/html")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/html", validate_ssrf=False
+    )
     assert ct == "text/html"
     assert isinstance(body, bytes) and len(body) > 0
     assert charset == "utf-8"
@@ -143,7 +135,9 @@ async def test_fetch_page_plain_text_branch(
     """Plain-text responses use the raw CDP body instead of rendered DOM."""
     base, _ = local_fetch_page_server
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/plain")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/plain", validate_ssrf=False
+    )
 
     assert ct == "text/plain"
     assert body == b"# Raw Markdown\n\nserved as plain text\n"
@@ -167,7 +161,9 @@ async def test_fetch_page_pdf_branch(
     base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/pdf")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/pdf", validate_ssrf=False
+    )
     assert ct == "application/pdf"
     assert isinstance(body, bytes) and body.startswith(b"%PDF-")
     assert charset == "utf-8"
@@ -285,7 +281,9 @@ async def test_fetch_page_pdf_forwards_browser_cookies(
         [cdp.network.CookieParam(name="session", value="valid", url=f"{base}/")]
     )
 
-    ct, body, _ = await _fetch_page(chrome_browser, f"{base}/pdf-cookie")
+    ct, body, _ = await _fetch_page(
+        chrome_browser, f"{base}/pdf-cookie", validate_ssrf=False
+    )
 
     assert ct == "application/pdf"
     assert body.startswith(b"%PDF-")

@@ -71,9 +71,9 @@ async def test_excluded_burst_costs_one_loop_crossing_per_event(
         threading.Event(),
     )
     assert bootstrapped is not None
-    observer, handler, _ = bootstrapped
+    handler = bootstrapped.event_handler
     # Only the events below reach the handler.
-    service._stop_bootstrap_observer(observer)
+    service._stop_bootstrap_observer(bootstrapped.observer)
     counting.crossings = 0
 
     for i in range(_BURST):

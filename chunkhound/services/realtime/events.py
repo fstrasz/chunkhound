@@ -20,17 +20,17 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 # On Linux, inotify reports every open and close (`opened`, `closed`,
 # `closed_no_write`); a start-up scan or a type-check run reads the whole tree,
 # so letting those through filled the queue, overflowed it and forced a full
-# resync (TFS 65770). The consumer never acted on `closed` (a write also
-# yields `modified`, `created` or `moved`, except an mmap write, which
-# inotify reports only on close). Without them two writes reach the
-# consumer as `modified, modified`, so its duplicate check must neither drop
-# a write made while the file is being processed nor let a dropped
-# duplicate skip the debounce refresh (see `_consume_events`).
-# `attrib` is a change (TFS 65771): on Windows, watchdog 7 reports an in-place
-# write as `attrib` whenever the record's change time is ahead of its write
-# time, which an ordinary append usually is, so for most writes it is the only
-# signal. On Linux it is IN_ATTRIB (chmod, touch), which watchdog 6 already
-# reported as `modified`. Reads raise no `attrib` on Windows because
+# resync. The consumer never acted on `closed` (a write also yields
+# `modified`, `created` or `moved`, except an mmap write, which inotify
+# reports only on close). Without them two writes reach the consumer as
+# `modified, modified`, so its duplicate check must neither drop a write made
+# while the file is being processed nor let a dropped duplicate skip the
+# debounce refresh (see `_consume_events`).
+# `attrib` is a change: on Windows, watchdog 7 reports an in-place write as
+# `attrib` whenever the record's change time is ahead of its write time, which
+# an ordinary append usually is, so for most writes it is the only signal. On
+# Linux it is IN_ATTRIB (chmod, touch), which watchdog 6 already reported as
+# `modified`. Reads raise no `attrib` on Windows because
 # ignore_windows_last_access() unsubscribes from last-access changes.
 WATCHDOG_TO_CONSUMER_EVENT = {
     "created": "created",
@@ -49,8 +49,8 @@ def ignore_windows_last_access() -> None:
     access time, and watchdog subscribes to that
     (FILE_NOTIFY_CHANGE_LAST_ACCESS): without this, each read raises an event
     (7: `attrib`, 6: `modified`) that takes a queue slot, and the start-up scan
-    reads every file. Writes still arrive through
-    LAST_WRITE, SIZE and ATTRIBUTES (TFS 65771).
+    reads every file. Writes still arrive through LAST_WRITE, SIZE and
+    ATTRIBUTES.
 
     watchdog has no per-watch flag: it reads the module global
     WATCHDOG_FILE_NOTIFY_FLAGS on every ReadDirectoryChangesW call (6.0 and
@@ -195,6 +195,22 @@ def _enqueue_realtime_event(
             type(error).__name__,
         )
 
+
+def forward_to_loop(
+    loop: asyncio.AbstractEventLoop, callback: Callable[[str, Path], None]
+) -> Callable[[str, Path], None]:
+    """Run an observer-thread event callback on the service's event loop.
+
+    The event loop owns the service's event counters, event-pressure state and
+    status snapshots; the watchdog observer calls back from its own thread.
+    call_soon_threadsafe runs callbacks in the order they were scheduled, so a
+    source event is still recorded before the queueing of the same event.
+    """
+
+    def forward(event_type: str, file_path: Path) -> None:
+        loop.call_soon_threadsafe(callback, event_type, file_path)
+
+    return forward
 
 
 @dataclass(frozen=True, slots=True)

@@ -878,7 +878,7 @@ class RealtimePipelineMixin:
 
         self._event_queue_overflow_current_burst_dropped += 1
     def _record_inotify_overflow(self) -> None:
-        """Resync after the kernel dropped inotify events (TFS 65772).
+        """Resync after the kernel dropped inotify events.
 
         Runs on the loop. watchdog has already rebuilt its watches, so changes
         lost before the rebuild are found by the scan and later ones arrive as
@@ -1044,7 +1044,7 @@ class RealtimePipelineMixin:
                     self._resync_in_progress = False
                     self._emit_status_update()
 
-                # A scan that raised (e.g. a failed Rust handover, TFS 65789) is
+                # A scan that raised (e.g. a failed Rust handover) is
                 # retried after a backoff. An error status from the embedding
                 # follow-up is not: re-running the scan cannot fix it.
                 delays = self._RESYNC_RETRY_DELAYS_SECONDS
@@ -1363,7 +1363,7 @@ class RealtimePipelineMixin:
                 # (the queued work reads the latest content), but not while it is
                 # being processed: that run may already have read the file, and
                 # only add_file reserves the follow-up that indexes the newer
-                # write (TFS 65781).
+                # write.
                 file_key = str(file_path)
                 current_time = time.time()
 
