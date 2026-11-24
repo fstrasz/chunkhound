@@ -4845,6 +4845,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         return [row["path"] for row in rows if row.get("path")]
 
+    def snapshot_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> frozenset[str]:
+        """Every indexed path at or under ``directory_prefix``, for delete admission.
+
+        A failure raises; it is never reported as an empty directory, which
+        realtime would read as "no file here is indexed" (TFS 66286).
+        """
+        return frozenset(self.list_file_paths_under_directory(directory_prefix))
+
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None
     ) -> list[dict[str, Any]]:

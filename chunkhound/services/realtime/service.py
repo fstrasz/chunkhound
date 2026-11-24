@@ -239,6 +239,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._filtered_event_count = 0
         self._filtered_status_last_emit = float("-inf")
         self._filtered_status_flush_pending = False
+        # Excluded directory -> (its lookup key, the indexed paths under it),
+        # read once per directory for delete admission (TFS 66286).
+        self._excluded_dir_snapshots: dict[Path, tuple[str, frozenset[str]]] = {}
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0
         self._processing_error_count = 0

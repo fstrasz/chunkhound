@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from loguru import logger
 
@@ -109,7 +109,23 @@ def _in_tree_path(path: Path | str) -> Path:
 
 
 QueueResultCallback = Callable[[str, Path, bool, str | None], None]
-AdmissionCallback = Callable[[str, Path, bool], bool]
+
+
+class AdmissionCallback(Protocol):
+    """Decides an event's admission given the path filter's verdict.
+
+    ``excluded_dir`` is given for a delete the filter rejected because a
+    directory above it is excluded: the topmost such directory, in the tree.
+    """
+
+    def __call__(
+        self,
+        event_type: str,
+        file_path: Path,
+        should_index: bool,
+        *,
+        excluded_dir: Path | None = None,
+    ) -> bool: ...
 
 
 class _WatchmanTranslationError(RuntimeError):
@@ -368,7 +384,12 @@ class SimpleEventHandler:
         )
         if self._admission_callback is None:
             return path_allowed
-        return self._admission_callback(event_type, file_path, path_allowed)
+        excluded_dir = None
+        if event_type == "deleted" and not path_allowed:
+            excluded_dir = self._path_filter.excluded_directory_of(file_path)
+        return self._admission_callback(
+            event_type, file_path, path_allowed, excluded_dir=excluded_dir
+        )
 
     def _queue_admitted(self, event_type: str, in_tree: Path) -> None:
         """Queue an admitted path by its resolved form, unless that leaves the root.

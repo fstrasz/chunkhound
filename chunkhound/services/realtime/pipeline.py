@@ -14,7 +14,10 @@ from typing import Any
 
 from loguru import logger
 
-from chunkhound.core.utils.path_utils import normalize_realtime_path
+from chunkhound.core.utils.path_utils import (
+    normalize_path_for_lookup,
+    normalize_realtime_path,
+)
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.providers.database.serial_executor import (
@@ -69,6 +72,8 @@ def _walk_files(top: Path, handler: SimpleEventHandler) -> Generator[Path, None,
 
 
 class RealtimePipelineMixin:
+    _excluded_dir_snapshots: dict[Path, tuple[str, frozenset[str]]]
+
     def _emit_status_update(self) -> None:
         try:
             if self._status_callback:
@@ -178,18 +183,72 @@ class RealtimePipelineMixin:
         event_type: str,
         file_path: Path,
         should_index: bool,
+        *,
+        excluded_dir: Path | None = None,
     ) -> bool:
         if should_index:
             return True
         if event_type != "deleted":
             return False
         try:
-            return self.services.provider.get_file_by_path(str(file_path)) is not None
+            provider = self.services.provider
+            if excluded_dir is not None and not self._may_be_indexed_under(
+                provider, file_path, excluded_dir
+            ):
+                return False
+            return provider.get_file_by_path(str(file_path)) is not None
         except Exception as error:
             logger.warning(
                 f"Realtime delete admission lookup failed for {file_path}: {error}"
             )
             return False
+
+    # Bound on kept excluded-directory snapshots; past it they start over.
+    _EXCLUDED_DIR_SNAPSHOTS_MAX = 8192
+
+    def _may_be_indexed_under(
+        self, provider: Any, file_path: Path, excluded_dir: Path
+    ) -> bool:
+        """False when ``excluded_dir``'s snapshot proves ``file_path`` has no row.
+
+        A re-install deletes tens of thousands of files under node_modules/,
+        and asking the database about each one held a following edit for two
+        minutes (TFS 66286). The indexed paths under the excluded directory are
+        read once, and a delete with no row there is rejected without a query.
+        True means "ask the database": the provider cannot take a snapshot,
+        taking one failed, the file's key does not lie under the snapshot's
+        prefix (a link inside the directory resolves elsewhere), or the
+        snapshot lists the file, which the point lookup then confirms.
+        """
+        snapshot_paths = getattr(provider, "snapshot_file_paths_under_directory", None)
+        if snapshot_paths is None:
+            return True
+        base_dir = provider.get_base_directory()
+        resolved_base_dir = provider.get_resolved_base_directory()
+        key = normalize_path_for_lookup(
+            file_path, base_dir, resolved_base_dir=resolved_base_dir
+        )
+        snapshots = self._excluded_dir_snapshots
+        snapshot = snapshots.get(excluded_dir)
+        if snapshot is None:
+            try:
+                prefix = normalize_path_for_lookup(
+                    excluded_dir, base_dir, resolved_base_dir=resolved_base_dir
+                )
+                snapshot = (prefix, snapshot_paths(prefix))
+            except Exception as error:
+                logger.debug(
+                    f"Realtime excluded-directory snapshot failed for "
+                    f"{excluded_dir}: {error}"
+                )
+                return True
+            if len(snapshots) >= self._EXCLUDED_DIR_SNAPSHOTS_MAX:
+                snapshots.clear()
+            snapshots[excluded_dir] = snapshot
+        prefix, indexed_paths = snapshot
+        if key != prefix and not key.startswith(prefix + "/"):
+            return True
+        return key in indexed_paths
     def _record_translation_error(self) -> None:
         self._translation_error_count += 1
     def _record_duplicate_suppression(
