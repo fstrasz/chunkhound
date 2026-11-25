@@ -91,8 +91,8 @@ async def test_excluded_burst_costs_one_loop_crossing_per_event(
     loop.call_soon(drained.set_result, None)
     await drained
 
-    # One record per excluded event; the edit records its source, then queues.
-    assert counting.crossings == _BURST + 2
+    # One wakeup drains the excluded burst; the edit records its source, then queues.
+    assert counting.crossings == 3
     status = service.health_snapshot()
     assert status["pipeline"]["filtered_event_count"] == _BURST
     assert status["event_queue"]["accepted"] == 1

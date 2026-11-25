@@ -852,16 +852,57 @@ class RealtimeStartupMixin:
         abort_event: threading.Event,
     ) -> WatchdogBootstrap | None:
         """Create and start a watchdog observer without mutating shared state."""
+        batch_lock = threading.Lock()
+        pending: list[tuple[str, Path]] | None = None
+
+        def drain(batch: list[tuple[str, Path]]) -> None:
+            nonlocal pending
+            with batch_lock:
+                if pending is batch:
+                    pending = None
+            for event_type, file_path in batch:
+                try:
+                    self._record_excluded_event(
+                        event_type, file_path, lexical_absolute=True
+                    )
+                except Exception as error:
+                    # One failed callback must not discard the rest of the batch.
+                    loop.call_exception_handler(
+                        {
+                            "message": "Error recording excluded watchdog event",
+                            "exception": error,
+                        }
+                    )
+
+        def forward_excluded(event_type: str, file_path: Path) -> None:
+            nonlocal pending
+            with batch_lock:
+                if pending is None:
+                    pending = [(event_type, file_path)]
+                    loop.call_soon_threadsafe(drain, pending)
+                else:
+                    pending.append((event_type, file_path))
+
+        def forward_source(event_type: str, file_path: Path) -> None:
+            nonlocal pending
+            # The preceding drain is already scheduled. Later rejects need
+            # their own drain behind this source and its queue callback.
+            with batch_lock:
+                pending = None
+                loop.call_soon_threadsafe(
+                    self._record_source_event, event_type, file_path
+                )
+
         event_handler = SimpleEventHandler(
             self.event_queue,
             self.config,
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=forward_to_loop(loop, self._record_source_event),
+            source_event_callback=forward_source,
             filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
-            excluded_event_callback=forward_to_loop(loop, self._record_excluded_event),
+            excluded_event_callback=forward_excluded,
         )
 
         def on_overflow() -> None:

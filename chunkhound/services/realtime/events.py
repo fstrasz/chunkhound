@@ -292,8 +292,11 @@ class SimpleEventHandler:
             # it sits in the tree: resolving first would turn a link under
             # node_modules/ into its target outside the root, which no exclude
             # rule matches.
-            in_tree = _in_tree_path(event.src_path)
-            if self._path_filter.excludes_directory(in_tree):
+            spelling = os.path.abspath(event.src_path)
+            in_tree = Path(spelling)
+            if self._path_filter.excludes_directory(
+                in_tree, absolute_spelling=spelling
+            ):
                 self._record_rejected_event("dir_created", in_tree)
                 return
             # Queue directory creation for processing
@@ -322,8 +325,6 @@ class SimpleEventHandler:
         # resolved target of a link above it (e.g. under node_modules/), and a
         # rejected event is never resolved: a burst of excluded events must not
         # pay for path resolution.
-        in_tree = _in_tree_path(event.src_path)
-
         # A delete is recorded before admission: admitting a delete the path
         # filter rejects asks the database whether the file was indexed, which
         # can wait on the database, and a status read must count the event as
@@ -331,6 +332,7 @@ class SimpleEventHandler:
         # the path alone, so it is decided first and a rejected one is
         # recorded in one call.
         if event_type == "deleted":
+            in_tree = _in_tree_path(event.src_path)
             self._record_source_event(event_type, in_tree)
             if not self._should_admit_event(event_type, in_tree):
                 self._record_filtered_event(event_type, in_tree)
@@ -339,7 +341,12 @@ class SimpleEventHandler:
             return
 
         # Simple filtering for supported file types.
-        if not self._should_admit_event(event_type, in_tree):
+        spelling = os.path.abspath(event.src_path)
+        in_tree = Path(spelling)
+        should_index = self._path_filter.should_index(
+            in_tree, absolute_spelling=spelling
+        )
+        if not self._should_admit_event(event_type, in_tree, should_index=should_index):
             self._record_rejected_event(event_type, in_tree)
             return
 

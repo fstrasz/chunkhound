@@ -833,6 +833,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         scope: str | None = None,
         count_event: bool = False,
         count_coalesced: bool = False,
+        observed_at: str | None = None,
     ) -> None:
         """``_track_event_pressure`` for a path already normalized as it does."""
         now_monotonic = time.monotonic()
@@ -849,7 +850,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             entry.last_scope = scope
         if event_type is not None:
             entry.last_event_type = event_type
-        entry.last_observed_at = self._utc_now()
+        entry.last_observed_at = observed_at or self._utc_now()
         entry.last_observed_monotonic = now_monotonic
         self._prune_event_pressure_entry(entry, now_monotonic=now_monotonic)
         # Trimmed only past twice the bound: trimming on every event re-pruned

@@ -127,7 +127,9 @@ class RealtimePathFilter:
             or self._include_degraded
         )
 
-    def excludes_directory(self, dir_path: Path) -> bool:
+    def excludes_directory(
+        self, dir_path: Path, *, absolute_spelling: str | None = None
+    ) -> bool:
         """Return whether an ignore rule excludes this directory where it sits.
 
         Pass the directory's path in the tree, before resolving links: a link
@@ -143,9 +145,11 @@ class RealtimePathFilter:
             return False
         try:
             if self._keep_dir_decisions:
-                in_tree = self._in_tree_under_root(dir_path)
-                if in_tree is not None:
-                    return self._directory_excluded(in_tree)
+                spelling = absolute_spelling or os.path.abspath(dir_path)
+                if self._below_root(spelling):
+                    return self._directory_excluded(
+                        dir_path if absolute_spelling is not None else Path(spelling)
+                    )
             return self._engine.matches(dir_path, is_dir=True) is not None
         except Exception:
             return False
@@ -183,11 +187,12 @@ class RealtimePathFilter:
         of the watchdog thread's time per event (TFS 65868).
         """
         in_tree = os.path.abspath(path)
-        key = os.path.normcase(in_tree)
+        return Path(in_tree) if self._below_root(in_tree) else None
+
+    def _below_root(self, absolute_spelling: str) -> bool:
+        key = os.path.normcase(absolute_spelling)
         prefix = self._in_tree_root_prefix
-        if len(key) > len(prefix) and key.startswith(prefix):
-            return Path(in_tree)
-        return None
+        return len(key) > len(prefix) and key.startswith(prefix)
 
     def _directory_excluded(self, dir_path: Path) -> bool:
         """Whether ``dir_path``, or a directory above it below the root, is excluded.
@@ -270,7 +275,9 @@ class RealtimePathFilter:
 
         return not self._engine_initialization_failed
 
-    def should_index(self, file_path: Path) -> bool:
+    def should_index(
+        self, file_path: Path, *, absolute_spelling: str | None = None
+    ) -> bool:
         """Return whether a path should enter the realtime indexing pipeline."""
         settings = self._settings
         if settings is None:
@@ -283,9 +290,9 @@ class RealtimePathFilter:
             try:
                 if self._engine is not None:
                     if self._keep_dir_decisions:
-                        in_tree = self._in_tree_under_root(file_path)
-                        if in_tree is not None and self._directory_excluded(
-                            in_tree.parent
+                        spelling = absolute_spelling or os.path.abspath(file_path)
+                        if self._below_root(spelling) and self._directory_excluded(
+                            Path(os.path.dirname(spelling))
                         ):
                             return False
                     if self._engine.matches(file_path, is_dir=False):

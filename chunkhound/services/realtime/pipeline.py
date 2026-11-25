@@ -115,7 +115,9 @@ class RealtimePipelineMixin:
         )
         self._emit_filtered_status_update()
 
-    def _record_excluded_event(self, event_type: str, file_path: Path | str) -> None:
+    def _record_excluded_event(
+        self, event_type: str, file_path: Path | str, *, lexical_absolute: bool = False
+    ) -> None:
         """Record a source event the filter rejected where it arrived.
 
         Leaves the state ``_record_source_event`` then ``_record_filtered_event``
@@ -123,9 +125,12 @@ class RealtimePipelineMixin:
         npm install sends hundreds of thousands of these (TFS 65868).
         """
         normalized_path = str(
-            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+            self._normalize_mutation_path(
+                file_path, keep_in_tree_spelling=True, lexical_absolute=lexical_absolute
+            )
         )
-        self._last_source_event_at = self._utc_now()
+        observed_at = self._utc_now()
+        self._last_source_event_at = observed_at
         self._last_source_event_type = event_type
         self._last_source_event_path = normalized_path
         self._filtered_event_count += 1
@@ -134,6 +139,7 @@ class RealtimePipelineMixin:
             event_type=event_type,
             scope="excluded",
             count_event=True,
+            observed_at=observed_at,
         )
         self._emit_filtered_status_update()
 
@@ -282,7 +288,11 @@ class RealtimePipelineMixin:
     ) -> asyncio.Task[Any]:
         return self._transient_tasks.create_task(awaitable)
     def _normalize_mutation_path(
-        self, file_path: Path | str, *, keep_in_tree_spelling: bool = False
+        self,
+        file_path: Path | str,
+        *,
+        keep_in_tree_spelling: bool = False,
+        lexical_absolute: bool = False,
     ) -> Path:
         """Return the logical path realtime state is keyed by.
 
@@ -293,14 +303,19 @@ class RealtimePipelineMixin:
         target is also in the tree, or that the filesystem spells differently
         (8.3 short names, letter case).
         """
-        path_obj = Path(file_path)
+        path_obj = file_path if isinstance(file_path, Path) else Path(file_path)
         base_dir = self.watch_path or getattr(self.config, "target_dir", None)
         if keep_in_tree_spelling and isinstance(base_dir, Path):
             path_str = str(path_obj)
             if (
-                path_obj.is_absolute()
-                and path_str.startswith(str(base_dir) + os.sep)
-                and os.path.normpath(path_str) == path_str
+                path_str.startswith(str(base_dir) + os.sep)
+                and (
+                    lexical_absolute
+                    or (
+                        path_obj.is_absolute()
+                        and os.path.normpath(path_str) == path_str
+                    )
+                )
             ):
                 return path_obj
         return normalize_realtime_path(
