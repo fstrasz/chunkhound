@@ -186,9 +186,9 @@ class WindowsSplitWatch:
                     and self.omitted.isdisjoint(endpoints)
                 ):
                     # Editors save root files by replacing them with a temp file.
-                    info = dest.lstat()
-                    if stat.S_ISREG(info.st_mode) and not (
-                        info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                    dest_info = dest.lstat()
+                    if stat.S_ISREG(dest_info.st_mode) and not (
+                        dest_info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
                     ):
                         self.handler.on_any_event(event)
                         return None
