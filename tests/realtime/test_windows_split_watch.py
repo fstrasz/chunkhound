@@ -14,6 +14,9 @@ from watchdog.version import VERSION_INFO
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
+)
 from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
@@ -70,7 +73,14 @@ async def wait_until(
     condition: Callable[[], bool], failure: str = "watcher did not converge"
 ) -> None:
     deadline = asyncio.get_running_loop().time() + 25
-    while not condition():
+    while True:
+        # A live watcher's resyncs and writes compact DuckDB, which refuses
+        # reads meanwhile with "retry in a few seconds": not yet, not a failure.
+        try:
+            if condition():
+                return
+        except DatabaseCompactionInProgressError:
+            pass
         assert asyncio.get_running_loop().time() < deadline, failure
         await asyncio.sleep(0.05)
 
@@ -211,8 +221,12 @@ async def test_moves_and_failed_attach_reconcile_before_reporting_coverage(
         await wait_until(
             lambda: service.health_snapshot()["resync"]["performed_count"] >= 1
         )
-        assert provider.get_file_by_path(str(old)) is None and indexed_text(
-            provider, moved, "moving_source"
+        await wait_until(
+            lambda: (
+                provider.get_file_by_path(str(old)) is None
+                and indexed_text(provider, moved, "moving_source")
+            ),
+            "cross-directory move was not reconciled",
         )
         temp = root / "root.py.tmp"
         temp.write_text("def replaced_root(): return 2\n")
