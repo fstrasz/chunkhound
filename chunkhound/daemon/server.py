@@ -241,8 +241,18 @@ class ChunkHoundDaemon(MCPServerBase):
         owner = lock.get("pid") if lock is not None else None
         if owner != pid:
             if isinstance(owner, int) and pid_alive(owner):
-                # Another live daemon holds the lock: something else is wrong.
-                # Do not fight it.
+                # Another live daemon holds the lock: do not fight it. With no
+                # clients left, no last-client-gone event will ever end this
+                # superseded daemon, so shut down now.
+                if self._client_manager.count() == 0:
+                    print(
+                        f"WARNING: daemon lock names another live daemon "
+                        f"(pid={owner}) and no clients remain; shutting down "
+                        f"(own pid={pid})",
+                        file=sys.stderr,
+                    )
+                    self._shutdown_event.set()
+                    return
                 print(
                     f"WARNING: daemon lock names another live daemon "
                     f"(pid={owner}); not re-publishing (own pid={pid})",
@@ -406,24 +416,39 @@ class ChunkHoundDaemon(MCPServerBase):
             self.debug_log(f"Cleanup error (non-fatal): {e}")
 
         if self._lock_written:
-            try:
-                self._discovery.remove_lock()
-                self.debug_log("Removed IPC lock file")
-            except Exception as e:
-                self.debug_log(f"Lock removal failed (non-fatal): {e}")
-
-            if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
-                try:
-                    os.unlink(self._socket_path)
-                    self.debug_log("Removed IPC socket")
-                except FileNotFoundError:
-                    pass
+            # A daemon that won publication and was later superseded must not
+            # remove the live daemon's lock, socket, or registry entry.
+            pid = os.getpid()
+            lock = self._discovery.read_lock()
+            lock_owner = lock.get("pid") if lock is not None else None
+            if lock_owner not in (pid, None):
+                self.debug_log(
+                    f"Leaving IPC lock and socket — lock names pid={lock_owner}"
+                )
             else:
-                self.debug_log("Skipping socket cleanup — TCP transport")
+                try:
+                    self._discovery.remove_lock()
+                    self.debug_log("Removed IPC lock file")
+                except Exception as e:
+                    self.debug_log(f"Lock removal failed (non-fatal): {e}")
 
-            try:
-                self._discovery.remove_registry_entry()
-            except Exception as e:
-                self.debug_log(f"Registry cleanup failed (non-fatal): {e}")
+                if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
+                    try:
+                        os.unlink(self._socket_path)
+                        self.debug_log("Removed IPC socket")
+                    except FileNotFoundError:
+                        pass
+                else:
+                    self.debug_log("Skipping socket cleanup — TCP transport")
+
+            entry = self._discovery.read_registry_entry()
+            entry_owner = entry.get("pid") if entry is not None else None
+            if entry_owner not in (pid, None):
+                self.debug_log(f"Leaving registry entry — it names pid={entry_owner}")
+            else:
+                try:
+                    self._discovery.remove_registry_entry()
+                except Exception as e:
+                    self.debug_log(f"Registry cleanup failed (non-fatal): {e}")
 
         self.debug_log("Daemon shutdown complete")

@@ -743,6 +743,10 @@ class DaemonDiscovery:
         }
         write_json_atomically(self.get_registry_entry_path(), data)
 
+    def read_registry_entry(self) -> dict[str, Any] | None:
+        """Read this project's registry entry, or None if absent or corrupt."""
+        return self._read_json_file(self.get_registry_entry_path())
+
     def remove_registry_entry(self) -> None:
         """Remove this daemon's registry entry if present."""
         try:
