@@ -232,8 +232,11 @@ class TestDaemonStartupOrder:
         self,
         config: Config,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify cleanup() runs before removing published artifacts."""
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_RUNTIME_DIR", str(tmp_path / "runtime"))
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_REGISTRY_DIR", str(tmp_path / "registry"))
         call_order: list[str] = []
         socket_path = str(tmp_path / "test.sock")
         project_dir = tmp_path
@@ -293,8 +296,11 @@ class TestDaemonStartupOrder:
         self,
         config: Config,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Barrier failure after publication must still run cleanup first."""
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_RUNTIME_DIR", str(tmp_path / "runtime"))
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_REGISTRY_DIR", str(tmp_path / "registry"))
         call_order: list[str] = []
         socket_path = str(tmp_path / "test.sock")
 
@@ -352,7 +358,6 @@ class TestDaemonStartupOrder:
             mock_create.return_value = (mock_server, socket_path)
             with pytest.raises(RuntimeError, match="startup barrier failed"):
                 await daemon.run()
-        daemon._discovery.remove_registry_entry()
 
         cleanup_idx = call_order.index("cleanup.start")
         for artifact_step in ["remove_lock", "unlink_socket"]:
