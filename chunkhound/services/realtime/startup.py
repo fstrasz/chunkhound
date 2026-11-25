@@ -5,11 +5,12 @@ import copy
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
 
@@ -32,6 +33,13 @@ from .events import (
 )
 from .inotify_overflow import InotifyOverflowDetection
 
+if TYPE_CHECKING:
+    from chunkhound.core.config.config import Config
+    from chunkhound.database_factory import DatabaseServices
+
+    from .context import RealtimeServiceContext
+    from .windows_split_watch import WindowsSplitWatch
+
 
 class RealtimeObserver(Protocol):
     """Minimal watchdog observer contract used by the watchdog backend only."""
@@ -45,6 +53,8 @@ class RealtimeObserver(Protocol):
     ) -> Any: ...
 
     def start(self) -> None: ...
+
+    def unschedule_all(self) -> None: ...
 
     def is_alive(self) -> bool: ...
 
@@ -60,6 +70,7 @@ class WatchdogBootstrap:
     observer: RealtimeObserver
     event_handler: SimpleEventHandler
     inotify_overflow_detection: InotifyOverflowDetection
+    layout: WindowsSplitWatch | None = None
 
 
 def _create_watchdog_observer(
@@ -301,6 +312,33 @@ class RealtimeStartupStatusTracker:
 
 
 class RealtimeStartupMixin:
+    config: Config
+    services: DatabaseServices
+    watched_directories: set[str]
+    monitoring_ready: asyncio.Event
+    _monitoring_ready_at: str | None
+    observer: RealtimeObserver | None
+    event_handler: SimpleEventHandler | None
+    _realtime_context: RealtimeServiceContext
+    _resync_callback: (
+        Callable[[str, dict[str, Any] | None], Awaitable[dict[str, Any] | None]] | None
+    )
+    _resync_request_count: int
+    _watchdog_reconciling: bool
+    _watchdog_recovery_request: int | None
+    _watchdog_changes_task: asyncio.Task[None] | None
+    _watchdog_fallback_reason: str | None
+
+    def _use_windows_split_watch(self) -> bool:
+        if not IS_WINDOWS or self._resync_callback is None:
+            return False
+        try:
+            from watchdog.version import VERSION_INFO
+        except ImportError:
+            return False
+
+        return VERSION_INFO == (7, 1, 0)
+
     def _start_startup_phase(self, phase_name: str) -> None:
         self._startup_tracker.start_phase(phase_name)
         self._emit_status_update()
@@ -469,14 +507,21 @@ class RealtimeStartupMixin:
             self.process_task = None
 
     async def _stop_observer(self) -> None:
+        if self._watchdog_changes_task:
+            # Let an in-flight native registration finish before closing its observer.
+            self._watchdog_changes_stop.set()
+            await self._watchdog_changes_task
+            self._watchdog_changes_task = None
         if self.observer:
-            self.observer.stop()
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.observer.join, 1.0)
+            await asyncio.to_thread(self._stop_bootstrap_observer, self.observer)
             if self.observer.is_alive():
                 logger.warning("Observer thread did not exit within timeout")
             self.observer = None
             self.event_handler = None
+        self.watched_directories.clear()
+        self._watchdog_reconciling = False
+        self._watchdog_recovery_request = None
+        self._watchdog_fallback_reason = None
 
     async def _cancel_polling_task(self) -> None:
         if self._polling_task:
@@ -504,7 +549,7 @@ class RealtimeStartupMixin:
             return
         if not future.done():
             try:
-                await asyncio.wait_for(future, timeout=1.0)
+                await asyncio.wait_for(asyncio.shield(future), timeout=1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             except Exception as error:
@@ -695,68 +740,113 @@ class RealtimeStartupMixin:
     async def _setup_watchdog_with_timeout(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
-        """Setup watchdog with timeout - fall back to polling if it takes too long."""
-        self._watchdog_bootstrap_abort = threading.Event()
-        self._watchdog_bootstrap_future = loop.run_in_executor(
-            None,
-            self._bootstrap_fs_monitor,
-            watch_path,
-            loop,
-            self._watchdog_bootstrap_abort,
-        )
-        self._watchdog_bootstrap_future.add_done_callback(
-            self._handle_watchdog_bootstrap_done
+        """Try split coverage on Windows, then the recursive root, then polling."""
+        split = self._use_windows_split_watch()
+        self._watchdog_changes_stop = asyncio.Event()
+        reason = None
+        while True:
+            abort = self._watchdog_bootstrap_abort = threading.Event()
+            if reason is None:
+                future = loop.run_in_executor(
+                    None, self._bootstrap_fs_monitor, watch_path, loop, abort
+                )
+            else:
+                future = loop.run_in_executor(
+                    None, self._bootstrap_fs_monitor, watch_path, loop, abort, True
+                )
+            self._watchdog_bootstrap_future = future
+            future.add_done_callback(
+                partial(self._handle_watchdog_bootstrap_done, owner=abort)
+            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self._WATCHDOG_SETUP_TIMEOUT_SECONDS
+                )
+            except asyncio.CancelledError:
+                abort.set()
+                raise
+            except Exception as error:
+                abort.set()
+                detail = (
+                    "Watchdog setup timed out"
+                    if isinstance(error, asyncio.TimeoutError)
+                    else f"Watchdog setup failed: {error}"
+                )
+                if split and reason is None:
+                    reason = detail
+                    self._watchdog_fallback_reason = reason
+                    continue
+                self._fail_startup_phase("watchdog_setup", detail)
+                self._watchdog_reconciling = split
+                await self._start_polling_backend(
+                    watch_path, reason=f"{detail}; switched to polling mode"
+                )
+                if split:
+                    await self._request_watchdog_recovery(reason or detail)
+                return
+            if result is None:
+                return
+            self._watchdog_reconciling = reason is not None
+            if result.layout is not None:
+                self.watched_directories.update(str(p) for p in result.layout.covered)
+            self._adopt_watchdog_monitor(
+                result.observer,
+                result.event_handler,
+                watch_path,
+                result.inotify_overflow_detection,
+            )
+            if result.layout is not None:
+                self._watchdog_changes_task = asyncio.create_task(
+                    self._monitor_windows_changes(result.layout, result.observer)
+                )
+            if reason:
+                self._set_warning(reason)
+                await self._request_watchdog_recovery(reason)
+            return
+
+    async def _request_watchdog_recovery(self, cause: str) -> None:
+        self._watchdog_recovery_request = self._resync_request_count + 1
+        await self._realtime_context.request_resync(
+            "watchdog_coverage_changed", {"cause": cause}
         )
 
+    async def _monitor_windows_changes(
+        self, layout: WindowsSplitWatch, observer: RealtimeObserver
+    ) -> None:
+        reason = await layout.wait_for_transition(self._watchdog_changes_stop)
+        if reason is None or self._watchdog_changes_stop.is_set():
+            return
+        self.monitoring_ready.clear()
+        self._monitoring_ready_at = None
+        self._watchdog_fallback_reason = reason
+        self._watchdog_reconciling = True
+        self._watchdog_recovery_request = None
+        self._service_state = "degraded"
+        self._set_warning(reason)
+        self.watched_directories.clear()
         try:
-            bootstrap_result = await asyncio.wait_for(
-                asyncio.shield(self._watchdog_bootstrap_future),
-                timeout=self._WATCHDOG_SETUP_TIMEOUT_SECONDS,
-            )
-            if bootstrap_result is None:
+            await asyncio.to_thread(layout.use_recursive_root, observer)
+            self.watched_directories.add(str(layout.root))
+        except Exception as error:
+            await asyncio.to_thread(self._stop_bootstrap_observer, observer)
+            self.observer = None
+            self.event_handler = None
+            if self._watchdog_changes_stop.is_set():
                 return
-            self._adopt_watchdog_monitor(
-                bootstrap_result.observer,
-                bootstrap_result.event_handler,
-                watch_path,
-                bootstrap_result.inotify_overflow_detection,
-            )
-        except asyncio.TimeoutError:
-            self._watchdog_bootstrap_abort.set()
-            self._fail_startup_phase(
-                "watchdog_setup",
-                "Watchdog setup timed out",
-            )
-            logger.info(
-                f"Watchdog setup timed out for {watch_path} - falling back to polling"
-            )
             await self._start_polling_backend(
-                watch_path,
-                reason="Watchdog setup timed out; switched to polling mode",
+                layout.root, f"Recursive watchdog setup failed: {error}"
             )
-        except Exception as e:
-            self._watchdog_bootstrap_abort.set()
-            self._fail_startup_phase(
-                "watchdog_setup",
-                f"Watchdog setup failed: {e}",
-            )
-            logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
-            await self._start_polling_backend(
-                watch_path,
-                reason=f"Watchdog setup failed; switched to polling mode: {e}",
-            )
-        finally:
-            if (
-                self._watchdog_bootstrap_future
-                and self._watchdog_bootstrap_future.done()
-            ):
-                self._watchdog_bootstrap_future = None
+        if not self._watchdog_changes_stop.is_set():
+            await self._request_watchdog_recovery(reason)
 
     def _handle_watchdog_bootstrap_done(
         self,
         future: asyncio.Future[WatchdogBootstrap | None],
+        *,
+        owner: threading.Event | None = None,
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
+        abort = owner or self._watchdog_bootstrap_abort
         if self._watchdog_bootstrap_future is future:
             self._watchdog_bootstrap_future = None
         if future.cancelled():
@@ -765,12 +855,7 @@ class RealtimeStartupMixin:
         try:
             bootstrap_result = future.result()
         except Exception as error:
-            if (
-                not self._watchdog_bootstrap_abort.is_set()
-                and self._service_state not in {"stopping", "stopped"}
-            ):
-                logger.warning(f"Watchdog bootstrap failed: {error}")
-                self._set_error(f"Watchdog bootstrap failed: {error}")
+            logger.debug(f"Watchdog bootstrap finished with an error: {error}")
             return
 
         if bootstrap_result is None:
@@ -778,11 +863,13 @@ class RealtimeStartupMixin:
 
         observer = bootstrap_result.observer
         if (
-            self._watchdog_bootstrap_abort.is_set()
+            abort.is_set()
             or self._using_polling
             or self._service_state in {"stopping", "stopped"}
         ):
-            self._stop_bootstrap_observer(observer)
+            future.get_loop().run_in_executor(
+                None, self._stop_bootstrap_observer, observer
+            )
 
     async def _start_polling_backend(
         self, watch_path: Path, reason: str, emit_warning: bool = True
@@ -795,8 +882,9 @@ class RealtimeStartupMixin:
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
         self._set_effective_backend("polling")
         await asyncio.sleep(self._POLLING_STARTUP_SETTLE_SECONDS)
-        self._monitoring_ready_at = self._utc_now()
-        self.monitoring_ready.set()
+        if not self._watchdog_reconciling:
+            self._monitoring_ready_at = self._utc_now()
+            self.monitoring_ready.set()
         self._debug(reason)
         self._complete_startup_phase("polling_setup")
         if emit_warning:
@@ -825,11 +913,13 @@ class RealtimeStartupMixin:
         self._inotify_overflow_detection = inotify_overflow_detection
         self._using_polling = False
         self.watched_directories.add(str(watch_path))
-        logger.debug("Watchdog setup completed successfully (recursive mode)")
-        self._debug("watchdog setup complete (recursive)")
+        self._debug(
+            f"watchdog setup complete ({len(self.watched_directories)} watches)"
+        )
         self._set_effective_backend("watchdog")
-        self._monitoring_ready_at = self._utc_now()
-        self.monitoring_ready.set()
+        if not self._watchdog_reconciling:
+            self._monitoring_ready_at = self._utc_now()
+            self.monitoring_ready.set()
         self._complete_startup_phase("watchdog_setup")
         self._emit_status_update()
 
@@ -850,6 +940,7 @@ class RealtimeStartupMixin:
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
+        recursive_only: bool = False,
     ) -> WatchdogBootstrap | None:
         """Create and start a watchdog observer without mutating shared state."""
         batch_lock = threading.Lock()
@@ -911,15 +1002,38 @@ class RealtimeStartupMixin:
 
         observer, detection = _create_watchdog_observer(on_overflow)
 
-        # Use recursive=True to ensure all directory events are captured
-        # This is necessary for proper real-time monitoring of new directories
-        observer.schedule(
-            event_handler,
-            str(watch_path),
-            recursive=True,  # Use recursive for complete event coverage
-            event_filter=watchdog_event_filter(),
-        )
-        observer.start()
+        layout = None
+        if self._use_windows_split_watch():
+
+            def resync_move() -> None:
+                loop.call_soon_threadsafe(
+                    self._realtime_context.schedule_loss_of_sync_resync,
+                    "watchdog_unpaired_move",
+                    None,
+                )
+
+            event_handler.unpaired_move_callback = resync_move
+            if not recursive_only:
+                from .windows_split_watch import WindowsSplitWatch
+
+                layout = WindowsSplitWatch(
+                    watch_path, self.config, self.services.provider, event_handler, loop
+                )
+                event_handler.intercept = layout.intercept
+        try:
+            if layout is not None:
+                layout.start(observer, abort_event)
+            else:
+                observer.schedule(
+                    event_handler,
+                    str(watch_path),
+                    recursive=True,
+                    event_filter=watchdog_event_filter(),
+                )
+                observer.start()
+        except Exception:
+            self._stop_bootstrap_observer(observer)
+            raise
 
         # Wait for observer thread to be fully running
         # On Windows, observer thread startup can be noticeably slower.
@@ -937,8 +1051,7 @@ class RealtimeStartupMixin:
             return None
 
         if observer.is_alive():
-            logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
-            return WatchdogBootstrap(observer, event_handler, detection)
+            return WatchdogBootstrap(observer, event_handler, detection, layout)
 
         self._stop_bootstrap_observer(observer)
         raise RuntimeError("Observer failed to start within timeout")

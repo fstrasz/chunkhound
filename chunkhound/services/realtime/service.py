@@ -267,6 +267,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             asyncio.Future[WatchdogBootstrap | None] | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
+        self._watchdog_changes_task: asyncio.Task[None] | None = None
+        self._watchdog_changes_stop = asyncio.Event()
+        self._watchdog_fallback_reason: str | None = None
+        self._watchdog_reconciling = False
+        self._watchdog_recovery_request: int | None = None
         self._resync_dispatch_task: asyncio.Task | None = None
         self._active_start_task: asyncio.Task | None = None
         self._start_generation = 0
@@ -613,6 +618,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             }
         )
         status["pending_mutations"] = self._build_pending_mutation_snapshot()
+        if self._watchdog_fallback_reason is not None:
+            status["watchdog_fallback_reason"] = self._watchdog_fallback_reason
         for key, value in adapter_health.items():
             if key != "observer_alive":
                 status[key] = value

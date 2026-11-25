@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
@@ -305,6 +305,18 @@ def _spec_excludes_dir(rules: _SpecRules, rel: str) -> bool:
     if _git_dir_excluded(rules, rel):
         return True
     return _contents_covered(rules, rel) and not _negation_may_match_under(rules, rel)
+
+
+def compile_watch_exclusions(patterns: Iterable[str]) -> Callable[[str], bool]:
+    """Prove a whole config-excluded directory can be omitted by a watcher."""
+    rules = _spec_rules(_compile_gitwildmatch(patterns))
+
+    def excludes(rel: str) -> bool:
+        return _spec_excludes_dir(rules, rel) and not _negation_may_match_under(
+            rules, rel
+        )
+
+    return excludes
 
 
 def _spec_excludes_file(rules: _SpecRules, rel: str) -> bool:

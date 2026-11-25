@@ -241,6 +241,8 @@ class SimpleEventHandler:
     """Watchdog-compatible event handler without import-time watchdog coupling."""
 
     def dispatch(self, event: Any) -> None:
+        if self.intercept is not None and self.intercept(event):
+            return
         self.on_any_event(event)
 
     def __init__(
@@ -268,6 +270,8 @@ class SimpleEventHandler:
         self._filtered_event_callback = filtered_event_callback
         self._excluded_event_callback = excluded_event_callback
         self._admission_callback = admission_callback
+        self.intercept: Callable[[Any], bool] | None = None
+        self.unpaired_move_callback: Callable[[], None] | None = None
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -284,6 +288,22 @@ class SimpleEventHandler:
         # No callbacks for a dropped read: each would cost a cross-thread call.
         event_type = WATCHDOG_TO_CONSUMER_EVENT.get(event.event_type)
         if event_type is None:
+            return
+
+        if event_type == "moved" and (
+            not event.src_path or not getattr(event, "dest_path", "")
+        ):
+            # Windows can deliver NEW alone when a move crosses watch handles.
+            # Treat its destination as an arrival; an empty name is never a path.
+            if getattr(event, "dest_path", ""):
+                from watchdog.events import DirCreatedEvent, FileCreatedEvent
+
+                created = DirCreatedEvent if event.is_directory else FileCreatedEvent
+                self.on_any_event(created(event.dest_path))
+            if self.unpaired_move_callback and not getattr(
+                event, "is_synthetic", False
+            ):
+                self.unpaired_move_callback()
             return
 
         # Handle directory creation

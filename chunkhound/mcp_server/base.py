@@ -806,6 +806,18 @@ class MCPServerBase(ABC):
                         task.cancel()
 
             await self._run_initial_scan_with_retry(target_path)
+            if (
+                sys.platform == "win32"
+                and not done
+                and self._configured_realtime_backend() == "watchdog"
+            ):
+                # The timeout allowed this inventory to pass paths before the
+                # watcher covered them. Reconcile once monitoring catches up.
+                await asyncio.shield(monitoring_task)
+                if realtime_indexing.monitoring_ready.is_set():
+                    await realtime_indexing.request_resync(
+                        "watchdog_initial_scan_before_ready"
+                    )
             if ready_task in done:
                 initial_scan_completed_monotonic = time.monotonic()
                 initial_scan_total_duration = self._duration_seconds(

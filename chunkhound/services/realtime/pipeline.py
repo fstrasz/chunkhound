@@ -73,6 +73,11 @@ def _walk_files(top: Path, handler: SimpleEventHandler) -> Generator[Path, None,
 
 class RealtimePipelineMixin:
     _excluded_dir_snapshots: dict[Path, tuple[str, frozenset[str]]]
+    _resync_request_count: int
+    _watchdog_reconciling: bool
+    _watchdog_recovery_request: int | None
+    monitoring_ready: asyncio.Event
+    _monitoring_ready_at: str | None
 
     def _emit_status_update(self) -> None:
         try:
@@ -1029,6 +1034,7 @@ class RealtimePipelineMixin:
             self._resync_retry_count = 0
             while True:
                 started_request_at = self._last_resync_request_monotonic
+                started_request_count = self._resync_request_count
                 self._resync_in_progress = True
                 self._last_resync_started_at = self._utc_now()
                 self._last_resync_error = None
@@ -1050,6 +1056,15 @@ class RealtimePipelineMixin:
                     self._last_resync_completed_at = self._utc_now()
                     self._complete_event_queue_overflow_burst(success=True)
                     if self._service_state not in {"stopping", "stopped"}:
+                        if (
+                            self._watchdog_reconciling
+                            and self._watchdog_recovery_request is not None
+                            and started_request_count >= self._watchdog_recovery_request
+                            and started_request_count == self._resync_request_count
+                        ):
+                            self._watchdog_reconciling = False
+                            self._monitoring_ready_at = self._last_resync_completed_at
+                            self.monitoring_ready.set()
                         self._clear_resync_error_state()
                 except Exception as e:
                     self._last_resync_error = str(e)
