@@ -416,12 +416,13 @@ class ChunkHoundDaemon(MCPServerBase):
             self.debug_log(f"Cleanup error (non-fatal): {e}")
 
         if self._lock_written:
-            # A daemon that won publication and was later superseded must not
-            # remove the live daemon's lock, socket, or registry entry.
+            # Remove only what still names this daemon. A superseded daemon must
+            # not remove the live daemon's lock, socket, or registry entry, and
+            # an unreadable file (None) may belong to a live daemon too.
             pid = os.getpid()
             lock = self._discovery.read_lock()
             lock_owner = lock.get("pid") if lock is not None else None
-            if lock_owner not in (pid, None):
+            if lock_owner != pid:
                 self.debug_log(
                     f"Leaving IPC lock and socket — lock names pid={lock_owner}"
                 )
@@ -443,7 +444,7 @@ class ChunkHoundDaemon(MCPServerBase):
 
             entry = self._discovery.read_registry_entry()
             entry_owner = entry.get("pid") if entry is not None else None
-            if entry_owner not in (pid, None):
+            if entry_owner != pid:
                 self.debug_log(f"Leaving registry entry — it names pid={entry_owner}")
             else:
                 try:

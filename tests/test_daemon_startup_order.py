@@ -271,6 +271,9 @@ class TestDaemonStartupOrder:
 
         daemon._lock_written = True
         daemon._socket_path = socket_path
+        # Shutdown removes only artifacts that still name this daemon.
+        daemon._discovery.write_lock(os.getpid(), socket_path)
+        daemon._discovery.write_registry_entry(os.getpid(), socket_path)
 
         with patch("chunkhound.daemon.server.os.unlink", new=record_unlink):
             await daemon._graceful_shutdown()
@@ -330,6 +333,8 @@ class TestDaemonStartupOrder:
         daemon.initialize = mock_initialize  # type: ignore[assignment]
         daemon.await_startup_barrier = failing_barrier  # type: ignore[assignment]
         daemon.cleanup = record_cleanup  # type: ignore[assignment]
+        # Shutdown removes only artifacts that still name this daemon.
+        daemon._discovery.write_registry_entry(os.getpid(), socket_path)
         daemon._discovery.write_lock = MagicMock()  # type: ignore[assignment]
         daemon._discovery.read_lock = MagicMock(  # type: ignore[assignment]
             return_value={"pid": os.getpid()}
@@ -347,6 +352,7 @@ class TestDaemonStartupOrder:
             mock_create.return_value = (mock_server, socket_path)
             with pytest.raises(RuntimeError, match="startup barrier failed"):
                 await daemon.run()
+        daemon._discovery.remove_registry_entry()
 
         cleanup_idx = call_order.index("cleanup.start")
         for artifact_step in ["remove_lock", "unlink_socket"]:
