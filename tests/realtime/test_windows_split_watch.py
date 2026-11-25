@@ -198,6 +198,8 @@ async def test_moves_and_failed_attach_reconcile_before_reporting_coverage(
     root, _, service, provider = project
     old = root / "src/source.py"
     moved = root / "tools/source.py"
+    direct = root / "root.py"
+    direct.write_text("def original_root(): return 1\n")
     old.write_text("def moving_source(): return 1\n")
     await service.services.indexing_coordinator.process_file(old, skip_embeddings=True)
     assert indexed_text(provider, old, "moving_source")
@@ -212,6 +214,15 @@ async def test_moves_and_failed_attach_reconcile_before_reporting_coverage(
         assert provider.get_file_by_path(str(old)) is None and indexed_text(
             provider, moved, "moving_source"
         )
+        temp = root / "root.py.tmp"
+        temp.write_text("def replaced_root(): return 2\n")
+        temp.replace(direct)
+        await wait_until(lambda: indexed_text(provider, direct, "replaced_root"))
+        status = service.health_snapshot()
+        assert (
+            status["watched_directories_count"] == 3
+            and status.get("watchdog_fallback_reason") is None
+        ), "atomic replacement of a root file lost split coverage"
         (root / "tools").rename(root / "renamed")
         renamed = root / "renamed/source.py"
         await wait_until(

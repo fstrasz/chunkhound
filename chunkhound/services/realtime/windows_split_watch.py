@@ -177,6 +177,21 @@ class WindowsSplitWatch:
         """Classify off the dispatcher and event loop. Return a coverage loss reason."""
         path = Path(event.src_path or event.dest_path)
         if event.event_type == "moved":
+            if event.src_path and event.dest_path and not event.is_directory:
+                dest = Path(event.dest_path)
+                endpoints = (path, dest)
+                if (
+                    path.parent == dest.parent == self.root
+                    and self.covered.isdisjoint(endpoints)
+                    and self.omitted.isdisjoint(endpoints)
+                ):
+                    # Editors save root files by replacing them with a temp file.
+                    info = dest.lstat()
+                    if stat.S_ISREG(info.st_mode) and not (
+                        info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                    ):
+                        self.handler.on_any_event(event)
+                        return None
             return f"top-level rename: {path}"
         if path in self.covered:
             return f"top-level directory {event.event_type}: {path}"
