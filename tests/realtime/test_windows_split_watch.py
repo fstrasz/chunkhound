@@ -217,12 +217,16 @@ async def test_moves_and_failed_attach_reconcile_before_reporting_coverage(
         temp = root / "root.py.tmp"
         temp.write_text("def replaced_root(): return 2\n")
         temp.replace(direct)
-        await wait_until(lambda: indexed_text(provider, direct, "replaced_root"))
-        status = service.health_snapshot()
-        assert (
-            status["watched_directories_count"] == 3
-            and status.get("watchdog_fallback_reason") is None
-        ), "atomic replacement of a root file lost split coverage"
+
+        def root_replacement_indexed() -> bool:
+            status = service.health_snapshot()
+            assert (
+                status.get("watchdog_fallback_reason") is None
+                and status["watched_directories_count"] == 3
+            ), "atomic replacement of a root file lost split coverage"
+            return indexed_text(provider, direct, "replaced_root")
+
+        await wait_until(root_replacement_indexed)
         (root / "tools").rename(root / "renamed")
         renamed = root / "renamed/source.py"
         await wait_until(
