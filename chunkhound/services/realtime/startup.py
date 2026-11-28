@@ -869,15 +869,18 @@ class RealtimeStartupMixin:
 
         observer, detection = _create_watchdog_observer(on_overflow)
 
-        # Use recursive=True to ensure all directory events are captured
-        # This is necessary for proper real-time monitoring of new directories
-        observer.schedule(
-            event_handler,
-            str(watch_path),
-            recursive=True,  # Use recursive for complete event coverage
-            event_filter=watchdog_event_filter(),
-        )
-        observer.start()
+        try:
+            observer.schedule(
+                event_handler,
+                str(watch_path),
+                recursive=True,
+                event_filter=watchdog_event_filter(),
+            )
+            observer.start()
+        except BaseException:
+            # The inotify reader may already be running before the first watch opens.
+            self._stop_bootstrap_observer(observer)
+            raise
 
         # Wait for observer thread to be fully running
         # On Windows, observer thread startup can be noticeably slower.

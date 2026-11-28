@@ -5,13 +5,14 @@ IN_Q_OVERFLOW record. watchdog 7.1.0 emits no public event for that record,
 and 7.1.1 emits an EventsLostEvent that ChunkHound does not map. The FD reader
 calls ``on_overflow`` after watchdog handles the record on either version.
 
-The hook relies on two private watchdog internals:
-``inotify_c.InotifyFD.handle_event`` and ``InotifyObserver._inotify_fd``. On
-watchdog < 7.1, on a version whose internals no longer match, or where inotify
-is unusable, no hook is installed and detection reports "unavailable".
-tests/realtime/test_realtime_inotify_overflow.py exercises the hook on whatever
-watchdog the lock resolves to, so a version that changes these internals fails
-that test when the lock moves to it.
+The hook relies on ``inotify_c.InotifyFD.handle_event``,
+``InotifyObserver._inotify_fd``, and ``InotifyObserver._emitter_kwargs``.
+Detection reports "active" for a hooked reader or a recognized lazy observer
+whose first schedule() will install the hook. On Linux, an unrecognized reader
+layout or missing reader API yields "unavailable". A future watchdog with the
+same lazy layout but a different assignment path could bypass the hook.
+CI exercises the locked watchdog version, so the 7.1.0 constructor path and
+rejection of an unfamiliar layout are outside its regular coverage.
 
 watchdog is imported inside the function so importing this module never loads
 it (see tests/unit/test_watchdog_import_isolation.py).
@@ -49,14 +50,18 @@ def create_inotify_observer(
 
     # The same guard watchdog's own observer selection uses on Linux.
     try:
+        from watchdog.observers import inotify_c
         from watchdog.observers.inotify import InotifyObserver
-        from watchdog.observers.inotify_c import InotifyFD
     except (ImportError, UnsupportedLibcError):
         return None
-    if not callable(getattr(InotifyFD, "handle_event", None)):
+    reader = getattr(inotify_c, "InotifyFD", None)
+    if not isinstance(reader, type) or not callable(
+        getattr(reader, "handle_event", None)
+    ):
         return None
+    inotify_fd_cls = reader
 
-    class _OverflowSignalingInotifyFD(InotifyFD):
+    class _OverflowSignalingInotifyFD(inotify_fd_cls):  # type: ignore[misc,valid-type]
         def handle_event(self, event: Any) -> None:
             try:
                 super().handle_event(event)
@@ -75,12 +80,14 @@ def create_inotify_observer(
         def __setattr__(self, name: str, value: Any) -> None:
             # watchdog assigns the reader during construction in 7.1.0 and
             # during the first schedule() in 7.1.1, before installing a watch.
-            if name == "_inotify_fd" and isinstance(value, InotifyFD):
+            if name == "_inotify_fd" and isinstance(value, inotify_fd_cls):
                 value.__class__ = _OverflowSignalingInotifyFD
             super().__setattr__(name, value)
 
     observer = _OverflowObserver()
     fd = getattr(observer, "_inotify_fd", ...)
+    # In 7.1.1, the empty reader slot and emitter kwargs dict identify the
+    # observer that creates the reader and passes it to emitters in schedule().
     lazy = fd is None and isinstance(getattr(observer, "_emitter_kwargs", None), dict)
     if not lazy and not isinstance(fd, _OverflowSignalingInotifyFD):
         observer.stop()

@@ -1,8 +1,8 @@
 """A kernel inotify queue overflow requests a realtime resync.
 
 When the kernel inotify queue overflows it drops events and queues one
-IN_Q_OVERFLOW record. watchdog 7.1 rebuilds its watches but emits no event, so
-without a hook ChunkHound never learns that changes were lost.
+IN_Q_OVERFLOW record. watchdog 7.1.0 emits no public event for it, and 7.1.1
+emits an EventsLostEvent that ChunkHound does not map.
 """
 
 from __future__ import annotations

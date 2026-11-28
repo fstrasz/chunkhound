@@ -485,7 +485,9 @@ uvicorn==0.37.0
     #   mcp
 voyageai==0.3.5
     # via chunkhound (pyproject.toml)
-watchdog==6.0.0
+watchdog==7.1.1; python_version >= '3.11'
+    # via chunkhound (pyproject.toml)
+watchdog==6.0.0; python_version < '3.11'
     # via chunkhound (pyproject.toml)
 websockets==17.4
     # via

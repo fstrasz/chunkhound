@@ -5,7 +5,9 @@ These tests are designed to fail and show what's actually broken.
 
 import asyncio
 import shutil
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -68,6 +70,27 @@ class TestRealtimeFailures:
             pass
 
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"), reason="inotify is Linux-only"
+    )
+    async def test_missing_watch_root_releases_inotify_reader(self, realtime_setup):
+        from watchdog.observers import inotify_c
+        from watchdog.version import VERSION_INFO
+
+        if VERSION_INFO < (7, 1):
+            pytest.skip("watchdog < 7.1 has no observer-owned inotify reader")
+        service, watch_dir, _, _ = realtime_setup
+        existing_threads = set(threading.enumerate())
+        with pytest.raises(FileNotFoundError):
+            service._bootstrap_fs_monitor(
+                watch_dir / "missing", asyncio.get_running_loop(), threading.Event()
+            )
+        assert not any(
+            isinstance(thread, inotify_c.InotifyFD)
+            for thread in set(threading.enumerate()) - existing_threads
+        )
 
     @pytest.mark.asyncio
     async def test_threading_integration_is_broken(self, realtime_setup):

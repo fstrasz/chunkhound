@@ -30,7 +30,8 @@ voyageai>=0.3.5
 # File processing and utilities
 pandas>=2.3.0
 psutil>=7.1.0
-watchdog>=6.0.0
+watchdog>=7.1.0; python_version >= '3.11'
+watchdog>=4.0.0; python_version < '3.11'
 readchar>=4.2.0
 pymupdf>=1.27.0
 
